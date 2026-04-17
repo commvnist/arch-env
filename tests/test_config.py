@@ -17,6 +17,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.pacman_packages, ())
         self.assertEqual(config.aur_packages, ())
         self.assertTrue(config.mount_project)
+        self.assertFalse(config.forward_display)
 
     def test_valid_config_is_parsed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -81,6 +82,38 @@ extra = ["/tmp/example"]
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             (project / "arch-env.toml").write_text("[environment]\nname = \"dev\"\n", encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_forward_display_defaults_to_false(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text("[pacman]\npackages = []\n", encoding="utf-8")
+
+            config = load_config(project)
+
+        self.assertFalse(config.forward_display)
+
+    def test_forward_display_can_be_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                "[pacman]\npackages = []\n\n[shell]\nforward_display = true\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(project)
+
+        self.assertTrue(config.forward_display)
+
+    def test_invalid_forward_display_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                '[shell]\nforward_display = "yes"\n',
+                encoding="utf-8",
+            )
 
             with self.assertRaises(ConfigError):
                 load_config(project)

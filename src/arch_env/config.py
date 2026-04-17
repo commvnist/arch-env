@@ -36,6 +36,9 @@ packages = []
 [mounts]
 project = true
 extra = []
+
+[shell]
+# forward_display = true  # forward X11/Wayland/audio/D-Bus sockets to the host desktop
 """
 
 
@@ -47,6 +50,7 @@ class ArchEnvConfig:
     aur_packages: tuple[str, ...]
     mount_project: bool
     extra_mounts: tuple[Path, ...]
+    forward_display: bool = False
 
 
 def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvConfig:
@@ -73,10 +77,15 @@ def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvCo
     pacman = _table(raw, "pacman")
     aur = _table(raw, "aur")
     mounts = _table(raw, "mounts")
+    shell = _table(raw, "shell")
 
     mount_project = mounts.get("project", True)
     if not isinstance(mount_project, bool):
         raise ConfigError("[mounts].project must be a boolean")
+
+    forward_display = shell.get("forward_display", False)
+    if not isinstance(forward_display, bool):
+        raise ConfigError("[shell].forward_display must be a boolean")
 
     return ArchEnvConfig(
         environment_name=environment_name_from_config_path(config_path),
@@ -85,6 +94,7 @@ def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvCo
         aur_packages=_string_tuple(aur.get("packages", ()), "[aur].packages"),
         mount_project=mount_project,
         extra_mounts=_path_tuple(mounts.get("extra", ()), "[mounts].extra"),
+        forward_display=forward_display,
     )
 
 

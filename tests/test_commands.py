@@ -3,11 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from arch_env.commands import (
+    build_yay_command,
+    configure_container_sudo_command,
     container_term,
     container_first_path,
     create_container_user_command,
+    display_bind_mounts,
+    display_environment,
     forwarded_run_environment,
     host_group_id,
     host_user_id,
@@ -17,6 +22,8 @@ from arch_env.commands import (
     pacstrap_command,
     safe_shell_environment,
     shell_command,
+    install_built_yay_command,
+    yay_bootstrap_dependencies_command,
 )
 from arch_env.paths import build_environment_paths
 
@@ -159,6 +166,31 @@ class CommandTests(unittest.TestCase):
             ["pacman", "--noconfirm", "-Syu", "jq", "git"],
         )
 
+    def test_yay_bootstrap_dependencies_installs_go_without_prompt(self) -> None:
+        self.assertEqual(
+            yay_bootstrap_dependencies_command(),
+            ["pacman", "--noconfirm", "-S", "--needed", "go"],
+        )
+
+    def test_build_yay_command_does_not_install_with_makepkg(self) -> None:
+        command = build_yay_command(Path("/home/archenv/.cache/yay"))
+
+        self.assertIn("makepkg --noconfirm --nodeps --force", command[2])
+        self.assertNotIn("--install", command[2])
+
+    def test_install_built_yay_command_installs_as_root_with_pacman(self) -> None:
+        command = install_built_yay_command(Path("/home/archenv/.cache/yay"))
+
+        self.assertIn("find /home/archenv/.cache/yay/yay", command[2])
+        self.assertIn("pacman --noconfirm -U", command[2])
+        self.assertNotIn("sudo", command[2])
+
+    def test_container_sudo_command_limits_passwordless_access_to_pacman(self) -> None:
+        command = configure_container_sudo_command()
+
+        self.assertIn("NOPASSWD: /usr/bin/pacman", command[2])
+        self.assertIn("/etc/sudoers.d/archenv-pacman", command[2])
+
     def test_initialize_keyring_command_populates_archlinux_keys(self) -> None:
         command = initialize_keyring_command()
 
@@ -180,6 +212,74 @@ class CommandTests(unittest.TestCase):
 
     def test_host_ids_ignore_root_sudo_values(self) -> None:
         self.assertNotEqual(host_user_id({"SUDO_UID": "0"}), 0)
+
+    def test_display_environment_forwards_display_vars(self) -> None:
+        env = display_environment({
+            "DISPLAY": ":1",
+            "WAYLAND_DISPLAY": "wayland-1",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        })
+
+        self.assertEqual(env["DISPLAY"], ":1")
+        self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-1")
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/1000")
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/run/user/1000/bus")
+
+    def test_display_environment_omits_missing_vars(self) -> None:
+        env = display_environment({})
+
+        self.assertNotIn("DISPLAY", env)
+        self.assertNotIn("WAYLAND_DISPLAY", env)
+        self.assertNotIn("XDG_RUNTIME_DIR", env)
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
+        self.assertNotIn("PULSE_SERVER", env)
+        self.assertNotIn("XAUTHORITY", env)
+
+    def test_display_environment_sets_pulse_server_when_socket_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            pulse_dir = runtime_dir / "pulse"
+            pulse_dir.mkdir()
+            (pulse_dir / "native").touch()
+
+            env = display_environment({"XDG_RUNTIME_DIR": str(runtime_dir)})
+
+        self.assertEqual(env["PULSE_SERVER"], f"unix:{runtime_dir}/pulse/native")
+
+    def test_display_environment_maps_xauthority_to_container_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            xauth = Path(directory) / ".Xauthority"
+            xauth.touch()
+
+            env = display_environment({"XAUTHORITY": str(xauth)})
+
+        self.assertEqual(env["XAUTHORITY"], "/home/archenv/.Xauthority")
+
+    def test_display_bind_mounts_includes_existing_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_dir = Path(directory) / "runtime"
+            runtime_dir.mkdir()
+            xauth = Path(directory) / ".Xauthority"
+            xauth.touch()
+
+            mounts = display_bind_mounts({
+                "XDG_RUNTIME_DIR": str(runtime_dir),
+                "XAUTHORITY": str(xauth),
+            })
+
+        targets = [target for _, target in mounts]
+        self.assertIn(str(runtime_dir), targets)
+        self.assertIn("/home/archenv/.Xauthority", targets)
+
+    def test_display_bind_mounts_skips_missing_paths(self) -> None:
+        with patch.object(Path, "exists", return_value=False):
+            mounts = display_bind_mounts({
+                "XDG_RUNTIME_DIR": "/nonexistent/runtime",
+                "XAUTHORITY": "/nonexistent/.Xauthority",
+            })
+
+        self.assertEqual(mounts, ())
 
 
 if __name__ == "__main__":

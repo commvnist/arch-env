@@ -11,6 +11,20 @@ from arch_env.environment import EnvironmentManager
 from arch_env.errors import CommandExecutionError
 
 
+def _config(**kwargs: object) -> ArchEnvConfig:
+    defaults: dict[str, object] = {
+        "environment_name": "dev",
+        "config_path": Path("/tmp/dev.toml"),
+        "pacman_packages": (),
+        "aur_packages": (),
+        "mount_project": True,
+        "extra_mounts": (),
+        "forward_display": False,
+    }
+    defaults.update(kwargs)
+    return ArchEnvConfig(**defaults)  # type: ignore[arg-type]
+
+
 class EnvironmentMetadataTests(unittest.TestCase):
     def test_metadata_serializes_path_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -18,12 +32,9 @@ class EnvironmentMetadataTests(unittest.TestCase):
             manager = EnvironmentManager(project)
             paths = manager.paths("dev")
             paths.env_dir.mkdir(parents=True)
-            config = ArchEnvConfig(
-                environment_name="dev",
+            config = _config(
                 config_path=project / "dev.toml",
                 pacman_packages=("jq",),
-                aur_packages=(),
-                mount_project=True,
                 extra_mounts=(project / "cache",),
             )
 
@@ -38,14 +49,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
             project = Path(directory)
             runner = FailingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=(),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml")
 
             with patch("arch_env.environment.validate_host_prerequisites"):
                 with self.assertRaises(CommandExecutionError):
@@ -61,14 +65,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
             project = Path(directory)
             runner = RecordingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=(),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml")
 
             with patch("arch_env.environment.validate_host_prerequisites"):
                 manager.create("dev", config)
@@ -82,38 +79,30 @@ class EnvironmentMetadataTests(unittest.TestCase):
             project = Path(directory)
             runner = RecordingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=("jq",),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml", pacman_packages=("jq",))
 
             with patch("arch_env.environment.validate_host_prerequisites"):
                 manager.create("dev", config)
 
         keyring_command = runner.commands[2]
         install_command = runner.commands[3]
-        yay_command = runner.commands[4]
+        yay_sudo_command = runner.commands[4]
+        yay_deps_command = runner.commands[5]
+        yay_build_command = runner.commands[6]
+        yay_install_command = runner.commands[7]
         self.assertIn("pacman-key --init", " ".join(keyring_command))
         self.assertIn("pacman --noconfirm -Syu jq", " ".join(install_command))
-        self.assertIn("git clone https://aur.archlinux.org/yay.git", " ".join(yay_command))
+        self.assertIn("NOPASSWD: /usr/bin/pacman", " ".join(yay_sudo_command))
+        self.assertIn("pacman --noconfirm -S --needed go", " ".join(yay_deps_command))
+        self.assertIn("git clone https://aur.archlinux.org/yay.git", " ".join(yay_build_command))
+        self.assertIn("pacman --noconfirm -U", " ".join(yay_install_command))
 
     def test_create_bootstraps_yay_without_configured_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             runner = RecordingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=(),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml")
 
             with patch("arch_env.environment.validate_host_prerequisites"):
                 manager.create("dev", config)
@@ -127,14 +116,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
             runner = RecordingRunner()
             messages: list[str] = []
             manager = EnvironmentManager(project, runner=runner, progress=messages.append)
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=(),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml")
 
             with patch("arch_env.environment.validate_host_prerequisites"):
                 manager.create("dev", config)
@@ -152,14 +134,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
             paths = manager.paths("dev")
             paths.env_dir.mkdir(parents=True)
             paths.metadata_path.write_text("{}", encoding="utf-8")
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=(),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml")
 
             with patch("arch_env.environment.os.execvpe", side_effect=RuntimeError("stop")):
                 with self.assertRaises(RuntimeError):
@@ -177,14 +152,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
             paths = manager.paths("dev")
             paths.env_dir.mkdir(parents=True)
             paths.metadata_path.write_text("{}", encoding="utf-8")
-            config = ArchEnvConfig(
-                environment_name="dev",
-                config_path=project / "dev.toml",
-                pacman_packages=(),
-                aur_packages=(),
-                mount_project=True,
-                extra_mounts=(),
-            )
+            config = _config(config_path=project / "dev.toml")
 
             with patch("arch_env.environment.os.execvpe", side_effect=RuntimeError("stop")) as execvpe:
                 with self.assertRaises(RuntimeError):
@@ -195,6 +163,63 @@ class EnvironmentMetadataTests(unittest.TestCase):
         self.assertIn("useradd", " ".join(user_check_command))
         self.assertIn("run-user-check.log", str(runner.log_paths[0]))
         self.assertEqual(executed_command[-2:], ["python", "--version"])
+
+    def test_shell_includes_display_mounts_when_forward_display_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            runtime_dir = Path(directory) / "runtime"
+            runtime_dir.mkdir()
+            manager = EnvironmentManager(project)
+            paths = manager.paths("dev")
+            paths.env_dir.mkdir(parents=True)
+            paths.metadata_path.write_text("{}", encoding="utf-8")
+            config = _config(
+                config_path=project / "dev.toml",
+                forward_display=True,
+            )
+
+            captured: list[list[str]] = []
+
+            def fake_execvpe(path: str, args: list[str], env: dict[str, str]) -> None:
+                captured.append(args)
+                raise RuntimeError("stop")
+
+            fake_display = {"DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-1"}
+            fake_mounts: tuple[tuple[Path, str], ...] = ((runtime_dir, str(runtime_dir)),)
+            with patch("arch_env.environment.os.execvpe", side_effect=fake_execvpe):
+                with patch("arch_env.environment.display_environment", return_value=fake_display):
+                    with patch("arch_env.environment.display_bind_mounts", return_value=fake_mounts):
+                        with patch("arch_env.environment.EnvironmentManager._run_in_container"):
+                            with self.assertRaises(RuntimeError):
+                                manager.shell("dev", config)
+
+        nspawn_args = captured[0]
+        self.assertIn(f"--setenv=DISPLAY=:1", nspawn_args)
+        self.assertIn(f"--setenv=WAYLAND_DISPLAY=wayland-1", nspawn_args)
+        self.assertIn(f"{runtime_dir}:{runtime_dir}", nspawn_args)
+
+    def test_shell_omits_display_mounts_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            manager = EnvironmentManager(project)
+            paths = manager.paths("dev")
+            paths.env_dir.mkdir(parents=True)
+            paths.metadata_path.write_text("{}", encoding="utf-8")
+            config = _config(config_path=project / "dev.toml")
+
+            captured: list[list[str]] = []
+
+            def fake_execvpe(path: str, args: list[str], env: dict[str, str]) -> None:
+                captured.append(args)
+                raise RuntimeError("stop")
+
+            with patch("arch_env.environment.os.execvpe", side_effect=fake_execvpe):
+                with patch("arch_env.environment.EnvironmentManager._run_in_container"):
+                    with self.assertRaises(RuntimeError):
+                        manager.shell("dev", config)
+
+        nspawn_args = captured[0]
+        self.assertNotIn("--setenv=DISPLAY=:1", nspawn_args)
 
     def test_remove_uses_sudo_after_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

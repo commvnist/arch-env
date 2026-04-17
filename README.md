@@ -5,83 +5,169 @@
 packages: install packages into an isolated root, work against the current
 project, and delete the environment when it is no longer needed.
 
-The default environment mount policy is intentionally narrow. Only the current
-project directory is mounted read-write into the container.
+The default mount policy is intentionally narrow. Only the current project
+directory is mounted read-write into the container. The host system is otherwise
+untouched.
 
 ## Requirements
 
 - Arch Linux or an Arch-derived host
-- Python 3.11+
+- `python` 3.11+
 - `uv`
 - `sudo`
 - `systemd-nspawn`
 - `pacman`
 - `pacstrap` from `arch-install-scripts`
 
-Install host dependencies and Python dependencies:
+Install all host and Python dependencies at once:
 
 ```bash
 make deps
 ```
 
-Install `ae` and `arch-env` into your user PATH:
+## Installation
+
+Install the `ae` and `arch-env` commands into your user PATH:
 
 ```bash
 make install
 ```
 
-`make install` uses `uv tool install --force --reinstall .`. The reinstall flag
-matters while the project version is unchanged because it copies current local
-source into uv's tool environment instead of only refreshing command shims.
-Ensure the uv tool bin directory is on your `PATH`, usually `~/.local/bin`.
+This runs `uv tool install --force --reinstall .`. The `--reinstall` flag
+ensures the current local source is copied into uv's tool environment rather
+than only refreshing the command shim. Make sure `~/.local/bin` is on your
+`PATH` (uv's default tool bin directory).
 
-Run `make install` again after changing the source if you want the PATH-installed
-`ae` command to use the latest local code.
+Run `make install` again after any source change to pick up the latest code.
+
+To uninstall:
+
+```bash
+make uninstall
+```
 
 ## Quick Start
 
 ```bash
-uv run ae init
-uv run ae create
-uv run ae run python --version
-uv run ae shell
-uv run ae install jq
-uv run ae remove
+ae init          # write arch-env.toml
+ae create        # bootstrap the environment
+ae run python --version
+ae shell         # interactive shell inside the environment
+ae install jq    # install a package at any time
+ae remove        # delete the environment
 ```
 
-Open the interactive TUI:
+Run `ae` with no arguments to open the interactive TUI.
+
+## Commands
+
+All commands accept `--config/-c <file>` to target a specific config file and
+therefore a specific named environment (see [Multiple Environments](#multiple-environments)).
+
+### `ae init`
+
+Write a starter `arch-env.toml` in the current directory. Does nothing if the
+file already exists. Optionally opens the file in `$EDITOR` when run through the
+TUI.
+
+### `ae create`
+
+Bootstrap a new environment: runs `pacstrap`, creates the container user,
+initialises the pacman keyring, installs configured packages, and bootstraps
+`yay` for AUR support. All steps are logged under
+`.arch-env/envs/<name>/logs/`.
+
+If creation fails, the environment is marked `failed`. Fix the config and re-run
+`ae create` (delete the failed environment first with `ae remove`).
+
+### `ae shell`
+
+Enter an interactive Bash session inside the environment. The project directory
+is mounted at the same path inside the container. Exit with `exit` or `Ctrl-D`.
+
+### `ae run <command> [args...]`
+
+Run a single command inside the environment and stream its output directly to the
+terminal, similar to `uv run`. The full host shell environment is forwarded with
+identity values normalised to the container user and container package paths
+prepended to `PATH`.
 
 ```bash
-uv run ae
+ae run python --version
+ae run make test
+ae run -- bash -c "echo hello"
 ```
 
-The TUI shows the selected project, config file, environment path, and status.
-It provides keyboard actions for initializing a config file, creating an
-environment, entering a shell, running a command, installing packages, removing
-the environment, viewing metadata, and switching config files. When initializing
-a config file, the TUI asks whether to open it with `$EDITOR`.
+Run `ae` (not `sudo ae`). The tool calls `sudo` internally for the specific
+container operations that need it; wrapping the whole command in `sudo` strips
+the shell environment before `ae run` sees it.
+
+### `ae install <packages...>`
+
+Install one or more packages into an existing environment. Each package is
+checked against the official Arch repositories first; if not found there it is
+treated as an AUR package and installed via `yay`.
+
+```bash
+ae install jq
+ae install paru-bin neovim
+```
+
+### `ae remove`
+
+Delete the environment and all its state under `.arch-env/envs/<name>/`. Uses
+`sudo rm -rf` when the container root contains root-owned files.
+
+### `ae list`
+
+List all environments in the current project, one per line.
+
+### `ae info`
+
+Print environment metadata as JSON: creation time, status, config snapshot,
+arch-env version, and all relevant paths.
+
+## Interactive TUI
+
+Running `ae` with no subcommand opens a curses-based interactive interface.
+
+```
+arch-env interactive
+
+Project    /home/user/myproject
+Config     arch-env.toml
+Env        default
+Path       /home/user/myproject/.arch-env/envs/default
+Status     ready
+
+[n] init    [c] create  [s] shell   [r] run
+[p] install [d] delete  [i] info    [f] config  [q] quit
+```
+
+| Key | Action |
+|-----|--------|
+| `n` | Create the config file (prompts to open in `$EDITOR`) |
+| `c` | Create the environment |
+| `s` | Enter an interactive shell (exits TUI) |
+| `r` | Run a command (prompts for command, then exits TUI) |
+| `p` | Install packages (prompts for package names) |
+| `d` | Delete the environment (requires typing `yes`) |
+| `i` | Show JSON metadata in a scrollable pager |
+| `f` | Switch to a different config file |
+| `q` | Quit |
+
+Long-running operations (create, install, remove) display progress lines, then
+wait for Enter before returning to the TUI. Shell and run replace the TUI
+process entirely via `exec`.
 
 ## Configuration
 
-`ae init` writes `arch-env.toml`. The config file name determines the
-environment name:
-
-- `arch-env.toml` creates `.arch-env/envs/default`
-- `tools.toml` creates `.arch-env/envs/tools`
-- `python-tools.toml` creates `.arch-env/envs/python-tools`
-
-Use `--config` to select another config file:
-
-```bash
-uv run ae init --config tools.toml
-uv run ae create --config tools.toml
-uv run ae run --config tools.toml jq --version
-```
+`ae init` writes `arch-env.toml`. The complete set of options:
 
 ```toml
 # The environment name is derived from this file name.
-# arch-env.toml creates .arch-env/envs/default
-# tools.toml creates .arch-env/envs/tools
+# arch-env.toml  →  .arch-env/envs/default
+# tools.toml     →  .arch-env/envs/tools
 
 [pacman]
 packages = [
@@ -95,64 +181,192 @@ packages = [
 packages = []
 
 [mounts]
-project = true
-extra = []
+project = true   # mount the project directory read-write into the container
+extra = []       # additional host paths to mount at the same path inside the container
+
+[shell]
+# forward_display = true  # forward X11/Wayland/audio/D-Bus to the host desktop
 ```
 
-Environments are stored under `.arch-env/envs/<name>/`.
-Every created environment bootstraps `yay` inside the container so AUR packages
-can be installed without relying on the host `yay`.
+### `[pacman]`
 
-## Running Commands
+`packages` — list of packages to install from the official Arch repositories
+during `ae create`. Packages are installed with `pacman -Syu`.
 
-`ae run <command>` executes a command inside the environment and streams output
-directly to the current terminal, similar to `uv run`.
+### `[aur]`
 
-The current project directory is mounted read-write at the same path inside the
-container. The command receives the current shell environment with container
-identity values normalized to the `archenv` user. Container package paths are
-placed before the host `PATH`, so commands like `python`, `python3`, and `jq`
-resolve to packages installed in the Arch environment before any project-local
-Python `.venv` or host path entries.
+`packages` — list of AUR packages to install via `yay` during `ae create`.
 
-Run `ae` as your normal user. The tool invokes `sudo` for the specific Arch
-container operations that need it; wrapping the whole command in `sudo` can
-strip the shell environment before `ae run` sees it.
+### `[mounts]`
 
-## Logs
+`project` — when `true` (the default), the project directory is mounted
+read-write at the same absolute path inside the container. Set to `false` to
+run the environment in a fully isolated root.
 
-Long-running operations print progress steps before each external command starts.
-Each step includes the log file path, for example:
+`extra` — additional host paths to bind-mount at their same path inside the
+container. Supports `~` expansion.
 
-```text
+```toml
+[mounts]
+extra = ["~/fonts", "/media/data"]
+```
+
+### `[shell]`
+
+`forward_display` — when `true`, `ae shell` and `ae run` forward the host
+display and audio stack into the container, enabling GUI applications to render
+on the host desktop. Disabled by default.
+
+What gets forwarded (each only if present on the host):
+
+| Subsystem | Socket | Environment variables |
+|-----------|--------|-----------------------|
+| X11 | `/tmp/.X11-unix` | `DISPLAY`, `XAUTHORITY` |
+| Wayland | `$XDG_RUNTIME_DIR` | `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` |
+| PulseAudio / PipeWire | inside `XDG_RUNTIME_DIR` | `PULSE_SERVER` |
+| D-Bus session | inside `XDG_RUNTIME_DIR` | `DBUS_SESSION_BUS_ADDRESS` |
+
+Packages that GUI apps commonly need beyond their direct dependencies:
+
+```toml
+[pacman]
+packages = [
+  ...
+  "libsm",       # Qt xcb platform plugin
+  "ttf-dejavu",  # fallback fonts
+]
+```
+
+## Multiple Environments
+
+The config file name determines the environment name:
+
+| Config file | Environment |
+|-------------|-------------|
+| `arch-env.toml` | `default` |
+| `tools.toml` | `tools` |
+| `python-tools.toml` | `python-tools` |
+
+Pass `--config/-c` to target a specific environment:
+
+```bash
+ae init --config tools.toml
+ae create --config tools.toml
+ae run --config tools.toml jq --version
+ae shell --config tools.toml
+```
+
+Environment names must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`.
+
+## Directory Layout
+
+```
+.arch-env/
+└── envs/
+    └── default/
+        ├── root/              # container root filesystem (pacstrap output)
+        ├── cache/
+        │   ├── pacman/        # shared pacman package cache
+        │   └── aur/           # yay build and package cache
+        ├── logs/              # per-operation log files
+        └── metadata.json      # environment status and config snapshot
+```
+
+Log files follow the pattern `<step>.log`, e.g. `bootstrap-pacstrap.log`,
+`install-pacman.log`, `bootstrap-yay-build.log`. Each log starts with the exact
+command that was run.
+
+## Logs and Errors
+
+Long-running operations print a progress line before each external command:
+
+```
 ==> Bootstrapping Arch root with pacstrap.
 ==> Log: .arch-env/envs/default/logs/bootstrap-pacstrap.log
 ```
 
-If a command fails, the error output includes the failed command, exit code, and
-log path. The TUI uses the same progress messages when it temporarily leaves the
-screen for create, install, and remove actions.
+When a command fails, the error includes the command, exit code, and log path.
+Read the log to see the exact output from `pacstrap`, `pacman`, `makepkg`, etc.
+
+## AUR Bootstrap
+
+Every environment bootstraps `yay` regardless of whether AUR packages are
+configured, so `ae install <aur-package>` works at any time without additional
+setup. The bootstrap process:
+
+1. Installs `go` with root pacman (build dependency)
+2. Clones the `yay` AUR repository and runs `makepkg` as the container user
+3. Installs the built package with root pacman
+4. Grants the container user passwordless `sudo` access to `/usr/bin/pacman` only
+
+This means AUR builds run as the non-root `archenv` user but installation
+is handled by root pacman — `makepkg` never prompts for a password.
 
 ## Shell Appearance
 
-`ae shell` does not try to clone the host prompt theme. It forwards terminal
-capability variables such as `TERM` and `COLORTERM`, then starts a clean
-interactive Bash session with a simple prompt that explicitly resets terminal
-style before and after each prompt. This avoids container startup files or
-terminal-control sequences forcing a background color in the host terminal.
-The underlying `systemd-nspawn` invocation also disables nspawn's terminal
-background marker so the shell uses the host terminal background.
+`ae shell` starts a clean interactive Bash session. It does not clone the host
+prompt theme. Terminal capability variables (`TERM`, `COLORTERM`) are forwarded,
+and the prompt explicitly resets terminal styles to avoid bleeding colour
+sequences from nspawn's startup.
 
-Host-specific terminal names are normalized when the base Arch root does not
-ship the matching terminfo entry. For example, `TERM=xterm-kitty` is exposed
-inside the environment as `TERM=xterm-256color`, while `COLORTERM=truecolor` is
-still preserved.
+Host-specific terminal names that lack a matching terminfo entry in the base Arch
+root are normalised: `TERM=xterm-kitty` becomes `TERM=xterm-256color` while
+`COLORTERM=truecolor` is preserved.
+
+## Development
+
+### Running Tests
+
+```bash
+make test
+```
+
+Tests use the standard library `unittest` runner via `uv run`. No external test
+framework is required.
+
+### Project Structure
+
+```
+src/arch_env/
+├── __init__.py       # version
+├── __main__.py       # python -m arch_env entry point
+├── cli.py            # Typer CLI definition
+├── commands.py       # systemd-nspawn and shell command builders
+├── config.py         # TOML config parsing and ArchEnvConfig dataclass
+├── environment.py    # EnvironmentManager — create/shell/run/install/remove
+├── errors.py         # exception types
+├── paths.py          # EnvironmentPaths and directory layout
+├── prerequisites.py  # host dependency checks
+├── runner.py         # subprocess wrapper with log file output
+└── tui.py            # curses interactive interface
+
+tests/
+├── test_cli.py
+├── test_commands.py
+├── test_config.py
+├── test_environment.py
+├── test_paths.py
+├── test_runner.py
+└── test_tui.py
+```
+
+### Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make deps` | Install host packages and sync Python dependencies |
+| `make install` | Install `ae`/`arch-env` into `~/.local/bin` via uv |
+| `make reinstall` | Alias for install |
+| `make uninstall` | Remove the uv tool install |
+| `make test` | Run the test suite |
 
 ## Limitations
 
-This is not a Nix replacement. Package versions follow current Arch repository
-and AUR state unless pinning is added in a future version. AUR package builds
-execute arbitrary build scripts inside the environment, so users still need to
-trust the packages they install. Deleting an environment removes package state
-inside the environment root, but it cannot undo writes made to explicitly
-mounted host paths such as the current project directory.
+- Package versions follow current Arch repository and AUR state. Version pinning
+  is not yet supported.
+- AUR package builds execute arbitrary build scripts inside the container; trust
+  the packages you install.
+- Deleting an environment removes state inside the container root but cannot undo
+  writes made to mounted host paths such as the project directory.
+- The host must be running Arch Linux or an Arch-derived distribution.
+  `pacstrap` and `pacman` are not available on other distributions.

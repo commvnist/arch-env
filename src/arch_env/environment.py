@@ -11,16 +11,21 @@ import shutil
 from arch_env import __version__
 from arch_env.commands import (
     CONTAINER_USER,
-    bootstrap_yay_command,
+    build_yay_command,
+    configure_container_sudo_command,
     create_container_user_command,
+    display_bind_mounts,
+    display_environment,
     forwarded_run_environment,
     initialize_keyring_command,
+    install_built_yay_command,
     nspawn_command,
     pacman_install_command,
     pacman_query_command,
     safe_shell_environment,
     pacstrap_command,
     shell_command,
+    yay_bootstrap_dependencies_command,
     yay_install_command,
 )
 from arch_env.config import ArchEnvConfig
@@ -107,12 +112,18 @@ class EnvironmentManager:
             package_caches=False,
         )
         self._progress(f"Entering shell for environment '{name}'.")
+        env = safe_shell_environment()
+        bind_mounts: tuple[tuple[Path, str], ...] = ()
+        if config.forward_display:
+            env = {**env, **display_environment()}
+            bind_mounts = display_bind_mounts()
         command = nspawn_command(
             paths,
             shell_command(),
             project_mount=config.mount_project,
             extra_mounts=config.extra_mounts,
-            env=safe_shell_environment(),
+            bind_mounts=bind_mounts,
+            env=env,
             user=CONTAINER_USER,
             working_directory=paths.project_dir if config.mount_project else None,
         )
@@ -132,12 +143,18 @@ class EnvironmentManager:
             package_caches=False,
         )
         self._progress(f"Running in environment '{name}': {' '.join(command_to_run)}")
+        env = forwarded_run_environment()
+        bind_mounts: tuple[tuple[Path, str], ...] = ()
+        if config.forward_display:
+            env = {**env, **display_environment()}
+            bind_mounts = display_bind_mounts()
         command = nspawn_command(
             paths,
             list(command_to_run),
             project_mount=config.mount_project,
             extra_mounts=config.extra_mounts,
-            env=forwarded_run_environment(),
+            bind_mounts=bind_mounts,
+            env=env,
             user=CONTAINER_USER,
             working_directory=paths.project_dir if config.mount_project else None,
         )
@@ -191,11 +208,33 @@ class EnvironmentManager:
         self._progress("Bootstrapping yay inside the environment.")
         self._run_in_container(
             paths,
-            bootstrap_yay_command(Path(f"/home/{CONTAINER_USER}/.cache/yay")),
-            "bootstrap-yay.log",
-            "Bootstrapping yay",
+            configure_container_sudo_command(),
+            "bootstrap-sudo.log",
+            "Configuring container-only pacman sudo access",
+            project_mount=False,
+            package_caches=False,
+        )
+        self._run_in_container(
+            paths,
+            yay_bootstrap_dependencies_command(),
+            "bootstrap-yay-deps.log",
+            "Installing yay bootstrap dependencies",
+            project_mount=False,
+        )
+        self._run_in_container(
+            paths,
+            build_yay_command(Path(f"/home/{CONTAINER_USER}/.cache/yay")),
+            "bootstrap-yay-build.log",
+            "Building yay",
             project_mount=False,
             user=CONTAINER_USER,
+        )
+        self._run_in_container(
+            paths,
+            install_built_yay_command(Path(f"/home/{CONTAINER_USER}/.cache/yay")),
+            "bootstrap-yay-install.log",
+            "Installing built yay package",
+            project_mount=False,
         )
 
     def remove(self, name: str) -> EnvironmentPaths:

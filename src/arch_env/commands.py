@@ -136,6 +136,20 @@ def create_container_user_command(uid: int | None = None, gid: int | None = None
     ]
 
 
+def configure_container_sudo_command() -> list[str]:
+    return [
+        "sh",
+        "-lc",
+        (
+            "set -e; "
+            "install -d -m 0750 /etc/sudoers.d; "
+            f"printf '%s\\n' '{CONTAINER_USER} ALL=(root) NOPASSWD: /usr/bin/pacman' "
+            f"> /etc/sudoers.d/{CONTAINER_USER}-pacman; "
+            f"chmod 0440 /etc/sudoers.d/{CONTAINER_USER}-pacman"
+        ),
+    ]
+
+
 def host_user_id(host_env: dict[str, str] | None = None) -> int:
     source = host_env if host_env is not None else os.environ
     return _positive_int(source.get("SUDO_UID")) or os.getuid()
@@ -178,20 +192,73 @@ def yay_install_command(packages: tuple[str, ...] | list[str]) -> list[str]:
     return ["yay", "--noconfirm", "-S", *packages]
 
 
-def bootstrap_yay_command(aur_cache_dir: Path) -> list[str]:
+def yay_bootstrap_dependencies_command() -> list[str]:
+    return ["pacman", "--noconfirm", "-S", "--needed", "go"]
+
+
+def build_yay_command(aur_cache_dir: Path) -> list[str]:
     return [
         "sh",
         "-lc",
         (
             "command -v yay >/dev/null 2>&1 || "
-            f"(mkdir -p {aur_cache_dir} && "
+            f"(export GOCACHE={aur_cache_dir}/.go-build && "
+            f"mkdir -p {aur_cache_dir} && "
             f"cd {aur_cache_dir} && "
             "rm -rf yay && "
             "git clone https://aur.archlinux.org/yay.git && "
             "cd yay && "
-            "makepkg --noconfirm -si)"
+            "makepkg --noconfirm --nodeps --force)"
         ),
     ]
+
+
+def install_built_yay_command(aur_cache_dir: Path) -> list[str]:
+    return [
+        "sh",
+        "-lc",
+        (
+            "command -v yay >/dev/null 2>&1 || "
+            f"(package=$(find {aur_cache_dir}/yay -maxdepth 1 -type f "
+            "-name 'yay-*.pkg.tar.*' ! -name '*.sig' | sort | tail -n 1) && "
+            "test -n \"$package\" && "
+            "pacman --noconfirm -U \"$package\")"
+        ),
+    ]
+
+
+def display_environment(host_env: dict[str, str] | None = None) -> dict[str, str]:
+    source = host_env if host_env is not None else os.environ
+    result = {}
+    for key in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        if source.get(key):
+            result[key] = source[key]
+    xdg_runtime = source.get("XDG_RUNTIME_DIR", "")
+    if xdg_runtime:
+        pulse_socket = Path(xdg_runtime) / "pulse" / "native"
+        if pulse_socket.exists():
+            result["PULSE_SERVER"] = f"unix:{pulse_socket}"
+    xauthority_str = source.get("XAUTHORITY")
+    xauthority = Path(xauthority_str) if xauthority_str else Path.home() / ".Xauthority"
+    if xauthority.exists():
+        result["XAUTHORITY"] = f"/home/{CONTAINER_USER}/.Xauthority"
+    return result
+
+
+def display_bind_mounts(host_env: dict[str, str] | None = None) -> tuple[tuple[Path, str], ...]:
+    source = host_env if host_env is not None else os.environ
+    mounts: list[tuple[Path, str]] = []
+    x11_socket_dir = Path("/tmp/.X11-unix")
+    if x11_socket_dir.exists():
+        mounts.append((x11_socket_dir, "/tmp/.X11-unix"))
+    xdg_runtime = source.get("XDG_RUNTIME_DIR")
+    if xdg_runtime and Path(xdg_runtime).exists():
+        mounts.append((Path(xdg_runtime), xdg_runtime))
+    xauthority_str = source.get("XAUTHORITY")
+    xauthority = Path(xauthority_str) if xauthority_str else Path.home() / ".Xauthority"
+    if xauthority.exists():
+        mounts.append((xauthority, f"/home/{CONTAINER_USER}/.Xauthority"))
+    return tuple(mounts)
 
 
 def shell_command(shell: str = "/bin/bash") -> list[str]:
