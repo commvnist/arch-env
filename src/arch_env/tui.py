@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import curses
 import json
+import os
 import shlex
+import subprocess
 
-from arch_env.config import CONFIG_FILE, ArchEnvConfig, load_config
+from arch_env.config import CONFIG_FILE, ArchEnvConfig, load_config, write_default_config
 from arch_env.environment import EnvironmentManager
 from arch_env.errors import ArchEnvError, CommandExecutionError
 
@@ -19,6 +21,7 @@ class MenuItem:
 
 
 MENU_ITEMS = (
+    MenuItem("n", "Init", "Create the selected config file and optionally edit it."),
     MenuItem("c", "Create", "Create the selected environment from its config."),
     MenuItem("s", "Shell", "Enter an interactive shell. This exits the TUI."),
     MenuItem("r", "Run", "Run a command in the environment. This exits the TUI."),
@@ -66,7 +69,9 @@ class InteractiveApp:
 
     def _handle_key(self, screen: curses.window, key: str) -> None:
         try:
-            if key == "c":
+            if key == "n":
+                self._terminal_action(screen, "Initializing config...", self._init_config)
+            elif key == "c":
                 self._terminal_action(screen, "Creating environment...", self._create)
             elif key == "s":
                 self._exec_action(screen, "Entering shell...", lambda: self.manager.shell(self.config.environment_name, self.config))
@@ -94,6 +99,20 @@ class InteractiveApp:
     def _create(self) -> None:
         paths = self.manager.create(self.config.environment_name, self.config)
         self.message = f"Created {self.config.environment_name}: {paths.env_dir}"
+
+    def _init_config(self) -> None:
+        path = write_default_config(self.project_dir, self.config_path)
+        print(f"Wrote {path}")
+        self.config = load_config(self.project_dir, self.config_path)
+        self.message = f"Wrote {path}"
+        answer = input("Open in $EDITOR now? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            return
+        editor = preferred_editor(os.environ)
+        if not editor:
+            print("EDITOR is not set; skipping editor launch.")
+            return
+        subprocess.run(editor_command(editor, path), check=False)
 
     def _install(self, packages: str) -> None:
         package_names = tuple(shlex.split(packages))
@@ -251,3 +270,14 @@ def _configure_colors() -> None:
     Palette.status_failed = curses.color_pair(5)
     Palette.message = curses.color_pair(6)
     Palette.subtle = curses.A_DIM
+
+
+def preferred_editor(env: dict[str, str]) -> str | None:
+    editor = env.get("EDITOR") or env.get("VISUAL")
+    if editor and editor.strip():
+        return editor.strip()
+    return None
+
+
+def editor_command(editor: str, path: Path) -> list[str]:
+    return [*shlex.split(editor), str(path)]

@@ -54,9 +54,10 @@ uv run ae
 ```
 
 The TUI shows the selected project, config file, environment path, and status.
-It provides keyboard actions for creating an environment, entering a shell,
-running a command, installing packages, removing the environment, viewing
-metadata, and switching config files.
+It provides keyboard actions for initializing a config file, creating an
+environment, entering a shell, running a command, installing packages, removing
+the environment, viewing metadata, and switching config files. When initializing
+a config file, the TUI asks whether to open it with `$EDITOR`.
 
 ## Configuration
 

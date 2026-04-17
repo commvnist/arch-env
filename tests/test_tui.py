@@ -33,6 +33,21 @@ class TuiTests(unittest.TestCase):
 
         start_color.assert_not_called()
 
+    def test_preferred_editor_uses_editor_before_visual(self) -> None:
+        self.assertEqual(tui.preferred_editor({"EDITOR": "vim", "VISUAL": "nano"}), "vim")
+
+    def test_preferred_editor_falls_back_to_visual(self) -> None:
+        self.assertEqual(tui.preferred_editor({"VISUAL": "nano"}), "nano")
+
+    def test_preferred_editor_returns_none_when_unset(self) -> None:
+        self.assertIsNone(tui.preferred_editor({}))
+
+    def test_editor_command_splits_editor_arguments(self) -> None:
+        self.assertEqual(
+            tui.editor_command("code --wait", tui.Path("arch-env.toml")),
+            ["code", "--wait", "arch-env.toml"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
