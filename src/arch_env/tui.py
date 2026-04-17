@@ -48,7 +48,7 @@ class InteractiveApp:
     def __init__(self, project_dir: Path, config_path: Path):
         self.project_dir = project_dir.resolve()
         self.config_path = config_path
-        self.manager = EnvironmentManager(self.project_dir)
+        self.manager = EnvironmentManager(self.project_dir, progress=print)
         self.config = load_config(self.project_dir, self.config_path)
         self.message = "Ready."
 

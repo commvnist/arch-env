@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, UTC
 from pathlib import Path
@@ -30,19 +31,27 @@ from arch_env.runner import CommandRunner
 
 
 class EnvironmentManager:
-    def __init__(self, project_dir: Path, runner: CommandRunner | None = None):
+    def __init__(
+        self,
+        project_dir: Path,
+        runner: CommandRunner | None = None,
+        progress: Callable[[str], None] | None = None,
+    ):
         self.project_dir = project_dir.resolve()
         self.runner = runner or CommandRunner()
+        self.progress = progress
 
     def paths(self, name: str) -> EnvironmentPaths:
         return build_environment_paths(self.project_dir, name)
 
     def create(self, name: str, config: ArchEnvConfig) -> EnvironmentPaths:
+        self._progress(f"Validating host prerequisites for environment '{name}'.")
         validate_host_prerequisites()
         paths = self.paths(name)
         if paths.metadata_path.exists():
             raise ArchEnvError(f"Environment already exists: {paths.env_dir}")
 
+        self._progress(f"Creating environment '{name}' at {paths.env_dir}.")
         paths.root_dir.mkdir(parents=True, exist_ok=True)
         paths.pacman_cache_dir.mkdir(parents=True, exist_ok=True)
         paths.aur_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -50,11 +59,16 @@ class EnvironmentManager:
         self._write_metadata(paths, config, status="creating")
 
         try:
-            self.runner.run(pacstrap_command(paths), log_path=paths.logs_dir / "bootstrap-pacstrap.log")
+            self._run_host_command(
+                pacstrap_command(paths),
+                paths.logs_dir / "bootstrap-pacstrap.log",
+                "Bootstrapping Arch root with pacstrap",
+            )
             self._run_in_container(
                 paths,
                 create_container_user_command(),
                 "bootstrap-user.log",
+                "Creating container user",
                 project_mount=False,
                 package_caches=False,
             )
@@ -62,6 +76,7 @@ class EnvironmentManager:
                 paths,
                 initialize_keyring_command(),
                 "bootstrap-keyring.log",
+                "Initializing pacman keyring",
                 project_mount=False,
                 package_caches=False,
             )
@@ -73,9 +88,11 @@ class EnvironmentManager:
                 self.install_aur_packages(paths, config.aur_packages)
         except ArchEnvError:
             self._write_metadata(paths, config, status="failed")
+            self._progress(f"Environment '{name}' failed. Logs are in {paths.logs_dir}.")
             raise
 
         self._write_metadata(paths, config, status="ready")
+        self._progress(f"Environment '{name}' is ready.")
         return paths
 
     def shell(self, name: str, config: ArchEnvConfig) -> None:
@@ -85,9 +102,11 @@ class EnvironmentManager:
             paths,
             create_container_user_command(),
             "shell-user-check.log",
+            "Ensuring container user exists",
             project_mount=False,
             package_caches=False,
         )
+        self._progress(f"Entering shell for environment '{name}'.")
         command = nspawn_command(
             paths,
             shell_command(),
@@ -108,9 +127,11 @@ class EnvironmentManager:
             paths,
             create_container_user_command(),
             "run-user-check.log",
+            "Ensuring container user exists",
             project_mount=False,
             package_caches=False,
         )
+        self._progress(f"Running in environment '{name}': {' '.join(command_to_run)}")
         command = nspawn_command(
             paths,
             list(command_to_run),
@@ -123,6 +144,7 @@ class EnvironmentManager:
         os.execvpe(command[0], command, _sudo_environment())
 
     def install(self, name: str, packages: tuple[str, ...]) -> EnvironmentPaths:
+        self._progress(f"Validating host prerequisites for package install in '{name}'.")
         validate_host_prerequisites()
         paths = self.paths(name)
         self._require_environment(paths)
@@ -130,6 +152,7 @@ class EnvironmentManager:
         aur_packages: list[str] = []
 
         for package in packages:
+            self._progress(f"Resolving package source: {package}")
             if self._is_pacman_package(paths, package):
                 pacman_packages.append(package)
             else:
@@ -139,45 +162,55 @@ class EnvironmentManager:
             self.install_pacman_packages(paths, tuple(pacman_packages))
         if aur_packages:
             self.install_aur_packages(paths, tuple(aur_packages))
+        self._progress(f"Package install complete for environment '{name}'.")
         return paths
 
     def install_pacman_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
+        self._progress(f"Installing pacman packages: {', '.join(packages)}")
         self._run_in_container(
             paths,
             pacman_install_command(packages),
             "install-pacman.log",
+            "Installing pacman packages",
             project_mount=False,
         )
 
     def install_aur_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
         self.bootstrap_yay(paths)
+        self._progress(f"Installing AUR packages: {', '.join(packages)}")
         self._run_in_container(
             paths,
             yay_install_command(packages),
             "install-aur.log",
+            "Installing AUR packages",
             project_mount=False,
             user=CONTAINER_USER,
         )
 
     def bootstrap_yay(self, paths: EnvironmentPaths) -> None:
+        self._progress("Bootstrapping yay inside the environment.")
         self._run_in_container(
             paths,
             bootstrap_yay_command(Path(f"/home/{CONTAINER_USER}/.cache/yay")),
             "bootstrap-yay.log",
+            "Bootstrapping yay",
             project_mount=False,
             user=CONTAINER_USER,
         )
 
     def remove(self, name: str) -> EnvironmentPaths:
         paths = self.paths(name)
+        self._progress(f"Removing environment '{name}' at {paths.env_dir}.")
         ensure_managed_environment_path(paths)
         try:
             shutil.rmtree(paths.env_dir)
         except PermissionError:
-            self.runner.run(
+            self._run_host_command(
                 ["sudo", "rm", "-rf", "--one-file-system", str(paths.env_dir)],
-                log_path=paths.state_dir / f"remove-{paths.name}.log",
+                paths.state_dir / f"remove-{paths.name}.log",
+                "Removing root-owned environment files",
             )
+        self._progress(f"Removed environment '{name}'.")
         return paths
 
     def list(self) -> list[EnvironmentPaths]:
@@ -199,22 +232,21 @@ class EnvironmentManager:
         paths: EnvironmentPaths,
         command: list[str],
         log_name: str,
+        description: str,
         *,
         project_mount: bool,
         package_caches: bool = True,
         user: str | None = None,
     ) -> None:
         bind_mounts = _package_cache_bind_mounts(paths) if package_caches else ()
-        self.runner.run(
-            nspawn_command(
-                paths,
-                command,
-                project_mount=project_mount,
-                bind_mounts=bind_mounts,
-                user=user,
-            ),
-            log_path=paths.logs_dir / log_name,
+        command_to_run = nspawn_command(
+            paths,
+            command,
+            project_mount=project_mount,
+            bind_mounts=bind_mounts,
+            user=user,
         )
+        self._run_host_command(command_to_run, paths.logs_dir / log_name, description)
 
     def _is_pacman_package(self, paths: EnvironmentPaths, package: str) -> bool:
         try:
@@ -222,10 +254,12 @@ class EnvironmentManager:
                 paths,
                 pacman_query_command(package),
                 "package-resolution.log",
+                f"Checking official repositories for {package}",
                 project_mount=False,
             )
             return True
         except CommandExecutionError:
+            self._progress(f"{package} was not found in official repositories; treating it as AUR.")
             return False
 
     def _require_environment(self, paths: EnvironmentPaths) -> None:
@@ -249,6 +283,15 @@ class EnvironmentManager:
             "config": _json_safe_config(config),
         }
         paths.metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _run_host_command(self, command: list[str], log_path: Path, description: str) -> None:
+        self._progress(f"{description}.")
+        self._progress(f"Log: {log_path}")
+        self.runner.run(command, log_path=log_path)
+
+    def _progress(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(message)
 
 
 def _json_safe_config(config: ArchEnvConfig) -> dict[str, object]:

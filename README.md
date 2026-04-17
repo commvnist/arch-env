@@ -119,6 +119,20 @@ Run `ae` as your normal user. The tool invokes `sudo` for the specific Arch
 container operations that need it; wrapping the whole command in `sudo` can
 strip the shell environment before `ae run` sees it.
 
+## Logs
+
+Long-running operations print progress steps before each external command starts.
+Each step includes the log file path, for example:
+
+```text
+==> Bootstrapping Arch root with pacstrap.
+==> Log: .arch-env/envs/default/logs/bootstrap-pacstrap.log
+```
+
+If a command fails, the error output includes the failed command, exit code, and
+log path. The TUI uses the same progress messages when it temporarily leaves the
+screen for create, install, and remove actions.
+
 ## Shell Appearance
 
 `ae shell` does not try to clone the host prompt theme. It forwards terminal

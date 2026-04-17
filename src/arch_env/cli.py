@@ -22,6 +22,14 @@ app = typer.Typer(
 )
 
 
+def progress(message: str) -> None:
+    typer.echo(f"==> {message}")
+
+
+def build_manager(project_dir: Path) -> EnvironmentManager:
+    return EnvironmentManager(project_dir.resolve(), progress=progress)
+
+
 @app.callback()
 def default(
     ctx: typer.Context,
@@ -66,7 +74,7 @@ def create(
 ) -> None:
     """Create the environment described by a config file."""
     loaded = load_config(project_dir.resolve(), config)
-    manager = EnvironmentManager(project_dir.resolve())
+    manager = build_manager(project_dir)
     paths = manager.create(loaded.environment_name, loaded)
     typer.echo(f"created environment {loaded.environment_name}: {paths.env_dir}")
 
@@ -78,7 +86,7 @@ def shell(
 ) -> None:
     """Enter an interactive environment shell."""
     loaded = load_config(project_dir.resolve(), config)
-    manager = EnvironmentManager(project_dir.resolve())
+    manager = build_manager(project_dir)
     typer.echo(f"entering environment {loaded.environment_name}: {manager.paths(loaded.environment_name).env_dir}", err=True)
     manager.shell(loaded.environment_name, loaded)
 
@@ -91,7 +99,7 @@ def run(
 ) -> None:
     """Run a command inside the environment."""
     loaded = load_config(project_dir.resolve(), config)
-    manager = EnvironmentManager(project_dir.resolve())
+    manager = build_manager(project_dir)
     manager.run(loaded.environment_name, loaded, tuple(command))
 
 
@@ -103,7 +111,7 @@ def install(
 ) -> None:
     """Install packages into the environment."""
     loaded = load_config(project_dir.resolve(), config)
-    manager = EnvironmentManager(project_dir.resolve())
+    manager = build_manager(project_dir)
     paths = manager.install(loaded.environment_name, tuple(packages))
     typer.echo(f"installed packages into {loaded.environment_name}: {paths.env_dir}")
 
@@ -115,7 +123,7 @@ def remove(
 ) -> None:
     """Delete the environment described by a config file."""
     loaded = load_config(project_dir.resolve(), config)
-    manager = EnvironmentManager(project_dir.resolve())
+    manager = build_manager(project_dir)
     paths = manager.remove(loaded.environment_name)
     typer.echo(f"removed environment {loaded.environment_name}: {paths.env_dir}")
 

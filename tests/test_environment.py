@@ -121,6 +121,29 @@ class EnvironmentMetadataTests(unittest.TestCase):
         commands = [" ".join(command) for command in runner.commands]
         self.assertTrue(any("git clone https://aur.archlinux.org/yay.git" in command for command in commands))
 
+    def test_create_emits_progress_messages_with_log_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            runner = RecordingRunner()
+            messages: list[str] = []
+            manager = EnvironmentManager(project, runner=runner, progress=messages.append)
+            config = ArchEnvConfig(
+                environment_name="dev",
+                config_path=project / "dev.toml",
+                pacman_packages=(),
+                aur_packages=(),
+                mount_project=True,
+                extra_mounts=(),
+            )
+
+            with patch("arch_env.environment.validate_host_prerequisites"):
+                manager.create("dev", config)
+
+        self.assertIn("Validating host prerequisites for environment 'dev'.", messages)
+        self.assertIn("Bootstrapping Arch root with pacstrap.", messages)
+        self.assertTrue(any("bootstrap-pacstrap.log" in message for message in messages))
+        self.assertIn("Environment 'dev' is ready.", messages)
+
     def test_shell_repairs_missing_container_user_before_exec(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
