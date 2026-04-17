@@ -68,6 +68,7 @@ class EnvironmentManager:
 
             if config.pacman_packages:
                 self.install_pacman_packages(paths, config.pacman_packages)
+            self.bootstrap_yay(paths)
             if config.aur_packages:
                 self.install_aur_packages(paths, config.aur_packages)
         except ArchEnvError:
@@ -149,17 +150,20 @@ class EnvironmentManager:
         )
 
     def install_aur_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
-        self._run_in_container(
-            paths,
-            bootstrap_yay_command(Path(f"/home/{CONTAINER_USER}/.cache/yay")),
-            "bootstrap-yay.log",
-            project_mount=False,
-            user=CONTAINER_USER,
-        )
+        self.bootstrap_yay(paths)
         self._run_in_container(
             paths,
             yay_install_command(packages),
             "install-aur.log",
+            project_mount=False,
+            user=CONTAINER_USER,
+        )
+
+    def bootstrap_yay(self, paths: EnvironmentPaths) -> None:
+        self._run_in_container(
+            paths,
+            bootstrap_yay_command(Path(f"/home/{CONTAINER_USER}/.cache/yay")),
+            "bootstrap-yay.log",
             project_mount=False,
             user=CONTAINER_USER,
         )

@@ -77,7 +77,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
         self.assertNotIn("/var/cache/pacman/pkg", bootstrap_user_command)
         self.assertNotIn("/home/archenv/.cache/yay", bootstrap_user_command)
 
-    def test_keyring_bootstrap_runs_before_package_install(self) -> None:
+    def test_create_bootstraps_yay_after_package_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             runner = RecordingRunner()
@@ -96,8 +96,30 @@ class EnvironmentMetadataTests(unittest.TestCase):
 
         keyring_command = runner.commands[2]
         install_command = runner.commands[3]
+        yay_command = runner.commands[4]
         self.assertIn("pacman-key --init", " ".join(keyring_command))
         self.assertIn("pacman --noconfirm -Syu jq", " ".join(install_command))
+        self.assertIn("git clone https://aur.archlinux.org/yay.git", " ".join(yay_command))
+
+    def test_create_bootstraps_yay_without_configured_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            runner = RecordingRunner()
+            manager = EnvironmentManager(project, runner=runner)
+            config = ArchEnvConfig(
+                environment_name="dev",
+                config_path=project / "dev.toml",
+                pacman_packages=(),
+                aur_packages=(),
+                mount_project=True,
+                extra_mounts=(),
+            )
+
+            with patch("arch_env.environment.validate_host_prerequisites"):
+                manager.create("dev", config)
+
+        commands = [" ".join(command) for command in runner.commands]
+        self.assertTrue(any("git clone https://aur.archlinux.org/yay.git" in command for command in commands))
 
     def test_shell_repairs_missing_container_user_before_exec(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

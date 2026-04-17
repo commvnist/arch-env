@@ -33,6 +33,9 @@ make install
 `make install` uses `uv tool install --force .`. Ensure the uv tool bin
 directory is on your `PATH`, usually `~/.local/bin`.
 
+Run `make install` again after changing the source if you want the PATH-installed
+`ae` command to use the latest local code.
+
 ## Quick Start
 
 ```bash
@@ -94,6 +97,8 @@ extra = []
 ```
 
 Environments are stored under `.arch-env/envs/<name>/`.
+Every created environment bootstraps `yay` inside the container so AUR packages
+can be installed without relying on the host `yay`.
 
 ## Running Commands
 

@@ -17,6 +17,7 @@ help:
 	@printf '%s\n' '  make aur-deps     Install optional AUR packages with yay'
 	@printf '%s\n' '  make sync         Sync Python dependencies with uv'
 	@printf '%s\n' '  make install      Install ae/arch-env into the user PATH with uv'
+	@printf '%s\n' '  make reinstall    Reinstall ae/arch-env after source changes'
 	@printf '%s\n' '  make uninstall    Remove the uv tool install'
 	@printf '%s\n' '  make test         Run the test suite'
 	@printf '%s\n' ''
@@ -56,5 +57,7 @@ uninstall:
 
 test:
 	$(UV) run python -m unittest discover -s tests
+
+reinstall: install
 
 check: test
