@@ -1,0 +1,20 @@
+[project]
+name = "arch-env"
+version = "0.1.0"
+description = "Disposable Arch Linux package environments for development."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.20.0",
+]
+
+[project.scripts]
+arch-env = "arch_env.cli:main"
+ae = "arch_env.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = []

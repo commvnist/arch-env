@@ -1,0 +1,18 @@
+# The environment name is derived from this file name.
+# arch-env.toml creates .arch-env/envs/default
+# tools.toml creates .arch-env/envs/tools
+
+[pacman]
+packages = [
+  "base",
+  "base-devel",
+  "git",
+  "python",
+]
+
+[aur]
+packages = []
+
+[mounts]
+project = true
+extra = []
