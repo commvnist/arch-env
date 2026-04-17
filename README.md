@@ -18,6 +18,21 @@ project directory is mounted read-write into the container.
 - `pacman`
 - `pacstrap` from `arch-install-scripts`
 
+Install host dependencies and Python dependencies:
+
+```bash
+make deps
+```
+
+Install `ae` and `arch-env` into your user PATH:
+
+```bash
+make install
+```
+
+`make install` uses `uv tool install --force .`. Ensure the uv tool bin
+directory is on your `PATH`, usually `~/.local/bin`.
+
 ## Quick Start
 
 ```bash
