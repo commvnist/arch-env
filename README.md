@@ -30,8 +30,10 @@ Install `ae` and `arch-env` into your user PATH:
 make install
 ```
 
-`make install` uses `uv tool install --force .`. Ensure the uv tool bin
-directory is on your `PATH`, usually `~/.local/bin`.
+`make install` uses `uv tool install --force --reinstall .`. The reinstall flag
+matters while the project version is unchanged because it copies current local
+source into uv's tool environment instead of only refreshing command shims.
+Ensure the uv tool bin directory is on your `PATH`, usually `~/.local/bin`.
 
 Run `make install` again after changing the source if you want the PATH-installed
 `ae` command to use the latest local code.

@@ -47,7 +47,7 @@ sync:
 
 install:
 	@command -v $(UV) >/dev/null 2>&1 || { printf '%s\n' 'uv is required. Run make deps first.' >&2; exit 1; }
-	$(UV) tool install --force .
+	$(UV) tool install --force --reinstall .
 	@printf '%s\n' 'Installed ae and arch-env with uv.'
 	@printf '%s\n' 'Ensure the uv tool bin directory is on PATH, usually ~/.local/bin.'
 
