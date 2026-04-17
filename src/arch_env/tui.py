@@ -126,7 +126,7 @@ class InteractiveApp:
         try:
             action()
         finally:
-            input("Press Enter to return to ae i...")
+            input("Press Enter to return to ae...")
             screen.clear()
 
     def _exec_action(self, screen: curses.window, label: str, action: object) -> None:
