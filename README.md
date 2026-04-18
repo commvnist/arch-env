@@ -249,6 +249,30 @@ Writable directory trees are limited to `/usr/local`, `/opt/arch-env`, and
 `/var/cache/arch-env`. Package-owned trees such as `/usr/lib`, `/usr/share`, and
 `/usr/include` are not made writable.
 
+### Adding Developer Package Manager Support
+
+Support for a developer package manager means making its normal install/cache
+paths land inside the container-owned writable prefixes above. Do not make
+additional package-owned system trees writable to support a tool.
+
+To add support:
+
+1. Add required directories under `/opt/arch-env`, `/var/cache/arch-env`, or an
+   existing `/usr/local` subdirectory in `DEVELOPER_WRITABLE_DIRECTORIES`.
+2. Add environment defaults in `developer_tool_environment()` so the tool uses
+   those directories without extra user setup.
+3. Add command-builder tests that prove the new directories are created, the new
+   environment variables are forwarded, and broad system paths such as
+   `/usr/lib`, `/usr/share`, and `/usr/include` remain untouched.
+4. Add or extend the smoke harness with a small dependency-backed Hello World
+   check for the package manager.
+5. Update this README table and the smoke-test description.
+
+Keep official distro package managers separate from this mechanism. Arch and
+AUR packages are installed through `ae install`, which uses root-owned helpers
+and temporarily restores package-manager directory modes before transactions.
+Developer package-manager support should not add sudo access or shell wrappers.
+
 ## Multiple Environments
 
 The config file name determines the environment name:
