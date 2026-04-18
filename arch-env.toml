@@ -16,3 +16,10 @@ packages = []
 [mounts]
 project = true
 extra = []
+
+[devices]
+gpu = false
+paths = []
+
+[env]
+passthrough = []

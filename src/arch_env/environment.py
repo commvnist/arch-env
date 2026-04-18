@@ -13,7 +13,10 @@ from arch_env.commands import (
     CONTAINER_USER,
     build_yay_command,
     configure_container_sudo_command,
+    configure_developer_write_access_command,
+    configure_package_manager_wrappers_command,
     create_container_user_command,
+    device_bind_mounts,
     display_bind_mounts,
     display_environment,
     forwarded_run_environment,
@@ -22,11 +25,14 @@ from arch_env.commands import (
     nspawn_command,
     pacman_install_command,
     pacman_query_command,
+    restore_package_manager_directory_modes_command,
     safe_shell_environment,
     pacstrap_command,
     shell_command,
+    verify_yay_command,
     yay_bootstrap_dependencies_command,
     yay_install_command,
+    yay_query_command,
 )
 from arch_env.config import ArchEnvConfig
 from arch_env.errors import ArchEnvError, CommandExecutionError
@@ -88,9 +94,11 @@ class EnvironmentManager:
 
             if config.pacman_packages:
                 self.install_pacman_packages(paths, config.pacman_packages)
-            self.bootstrap_yay(paths)
             if config.aur_packages:
                 self.install_aur_packages(paths, config.aur_packages)
+            else:
+                self.bootstrap_yay(paths)
+                self.configure_developer_write_access(paths)
         except ArchEnvError:
             self._write_metadata(paths, config, status="failed")
             self._progress(f"Environment '{name}' failed. Logs are in {paths.logs_dir}.")
@@ -111,12 +119,15 @@ class EnvironmentManager:
             project_mount=False,
             package_caches=False,
         )
+        self.configure_container_sudo(paths)
+        self.configure_developer_write_access(paths)
+        self.configure_package_manager_wrappers(paths)
         self._progress(f"Entering shell for environment '{name}'.")
-        env = safe_shell_environment()
-        bind_mounts: tuple[tuple[Path, str], ...] = ()
+        env = safe_shell_environment(passthrough=config.env_passthrough)
+        bind_mounts = device_bind_mounts(config.device_paths, forward_gpu=config.forward_gpu)
         if config.forward_display:
             env = {**env, **display_environment()}
-            bind_mounts = display_bind_mounts()
+            bind_mounts = (*bind_mounts, *display_bind_mounts())
         command = nspawn_command(
             paths,
             shell_command(),
@@ -142,12 +153,15 @@ class EnvironmentManager:
             project_mount=False,
             package_caches=False,
         )
+        self.configure_container_sudo(paths)
+        self.configure_developer_write_access(paths)
+        self.configure_package_manager_wrappers(paths)
         self._progress(f"Running in environment '{name}': {' '.join(command_to_run)}")
-        env = forwarded_run_environment()
-        bind_mounts: tuple[tuple[Path, str], ...] = ()
+        env = forwarded_run_environment(passthrough=config.env_passthrough)
+        bind_mounts = device_bind_mounts(config.device_paths, forward_gpu=config.forward_gpu)
         if config.forward_display:
             env = {**env, **display_environment()}
-            bind_mounts = display_bind_mounts()
+            bind_mounts = (*bind_mounts, *display_bind_mounts())
         command = nspawn_command(
             paths,
             list(command_to_run),
@@ -165,6 +179,16 @@ class EnvironmentManager:
         validate_host_prerequisites()
         paths = self.paths(name)
         self._require_environment(paths)
+        self._run_in_container(
+            paths,
+            create_container_user_command(),
+            "install-user-check.log",
+            "Ensuring container user exists",
+            project_mount=False,
+            package_caches=False,
+        )
+        self.configure_container_sudo(paths)
+        self.restore_package_manager_directory_modes(paths)
         pacman_packages: list[str] = []
         aur_packages: list[str] = []
 
@@ -179,11 +203,13 @@ class EnvironmentManager:
             self.install_pacman_packages(paths, tuple(pacman_packages))
         if aur_packages:
             self.install_aur_packages(paths, tuple(aur_packages))
+        self.configure_package_manager_wrappers(paths)
         self._progress(f"Package install complete for environment '{name}'.")
         return paths
 
     def install_pacman_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
         self._progress(f"Installing pacman packages: {', '.join(packages)}")
+        self.restore_package_manager_directory_modes(paths)
         self._run_in_container(
             paths,
             pacman_install_command(packages),
@@ -191,10 +217,13 @@ class EnvironmentManager:
             "Installing pacman packages",
             project_mount=False,
         )
+        self.configure_package_manager_wrappers(paths)
+        self.configure_developer_write_access(paths)
 
     def install_aur_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
         self.bootstrap_yay(paths)
         self._progress(f"Installing AUR packages: {', '.join(packages)}")
+        self.restore_package_manager_directory_modes(paths)
         self._run_in_container(
             paths,
             yay_install_command(packages),
@@ -203,17 +232,13 @@ class EnvironmentManager:
             project_mount=False,
             user=CONTAINER_USER,
         )
+        self.configure_package_manager_wrappers(paths)
+        self.configure_developer_write_access(paths)
 
     def bootstrap_yay(self, paths: EnvironmentPaths) -> None:
         self._progress("Bootstrapping yay inside the environment.")
-        self._run_in_container(
-            paths,
-            configure_container_sudo_command(),
-            "bootstrap-sudo.log",
-            "Configuring container-only pacman sudo access",
-            project_mount=False,
-            package_caches=False,
-        )
+        self.configure_container_sudo(paths)
+        self.restore_package_manager_directory_modes(paths)
         self._run_in_container(
             paths,
             yay_bootstrap_dependencies_command(),
@@ -235,6 +260,55 @@ class EnvironmentManager:
             "bootstrap-yay-install.log",
             "Installing built yay package",
             project_mount=False,
+        )
+        self._run_in_container(
+            paths,
+            verify_yay_command(),
+            "bootstrap-yay-verify.log",
+            "Verifying yay is available to the container user",
+            project_mount=False,
+            user=CONTAINER_USER,
+        )
+        self.configure_package_manager_wrappers(paths)
+
+    def restore_package_manager_directory_modes(self, paths: EnvironmentPaths) -> None:
+        self._run_in_container(
+            paths,
+            restore_package_manager_directory_modes_command(),
+            "package-manager-modes.log",
+            "Restoring package-manager directory modes",
+            project_mount=False,
+            package_caches=False,
+        )
+
+    def configure_package_manager_wrappers(self, paths: EnvironmentPaths) -> None:
+        self._run_in_container(
+            paths,
+            configure_package_manager_wrappers_command(),
+            "package-manager-wrappers.log",
+            "Configuring package-manager permission wrappers",
+            project_mount=False,
+            package_caches=False,
+        )
+
+    def configure_container_sudo(self, paths: EnvironmentPaths) -> None:
+        self._run_in_container(
+            paths,
+            configure_container_sudo_command(),
+            "container-sudo.log",
+            "Configuring container-only sudo access",
+            project_mount=False,
+            package_caches=False,
+        )
+
+    def configure_developer_write_access(self, paths: EnvironmentPaths) -> None:
+        self._run_in_container(
+            paths,
+            configure_developer_write_access_command(),
+            "developer-write-access.log",
+            "Configuring container-local developer write access",
+            project_mount=False,
+            package_caches=False,
         )
 
     def remove(self, name: str) -> EnvironmentPaths:
@@ -297,9 +371,28 @@ class EnvironmentManager:
                 project_mount=False,
             )
             return True
-        except CommandExecutionError:
-            self._progress(f"{package} was not found in official repositories; treating it as AUR.")
+        except CommandExecutionError as pacman_error:
+            pacman_log_path = pacman_error.log_path
+            self._progress(f"{package} was not confirmed in official repositories; checking AUR.")
+
+        try:
+            self.bootstrap_yay(paths)
+            self._run_in_container(
+                paths,
+                yay_query_command(package),
+                "aur-package-resolution.log",
+                f"Checking AUR for {package}",
+                project_mount=False,
+                user=CONTAINER_USER,
+            )
             return False
+        except CommandExecutionError as aur_error:
+            raise ArchEnvError(
+                (
+                    f"Could not resolve package '{package}' in official repositories or AUR. "
+                    f"pacman log: {pacman_log_path}; AUR log: {aur_error.log_path}"
+                )
+            ) from aur_error
 
     def _require_environment(self, paths: EnvironmentPaths) -> None:
         if not paths.metadata_path.exists():
@@ -337,6 +430,7 @@ def _json_safe_config(config: ArchEnvConfig) -> dict[str, object]:
     raw = asdict(config)
     raw["config_path"] = str(config.config_path)
     raw["extra_mounts"] = [str(path) for path in config.extra_mounts]
+    raw["device_paths"] = [str(path) for path in config.device_paths]
     return raw
 
 

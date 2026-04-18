@@ -17,6 +17,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.pacman_packages, ())
         self.assertEqual(config.aur_packages, ())
         self.assertTrue(config.mount_project)
+        self.assertFalse(config.forward_gpu)
+        self.assertEqual(config.device_paths, ())
+        self.assertEqual(config.env_passthrough, ())
         self.assertFalse(config.forward_display)
 
     def test_valid_config_is_parsed(self) -> None:
@@ -33,6 +36,13 @@ packages = ["paru-bin"]
 [mounts]
 project = false
 extra = ["/tmp/example"]
+
+[devices]
+gpu = true
+paths = ["/dev/example"]
+
+[env]
+passthrough = ["OPENAI_API_KEY", "CUSTOM_ENV"]
 """,
                 encoding="utf-8",
             )
@@ -44,6 +54,9 @@ extra = ["/tmp/example"]
         self.assertEqual(config.aur_packages, ("paru-bin",))
         self.assertFalse(config.mount_project)
         self.assertEqual(config.extra_mounts, (Path("/tmp/example"),))
+        self.assertTrue(config.forward_gpu)
+        self.assertEqual(config.device_paths, (Path("/dev/example"),))
+        self.assertEqual(config.env_passthrough, ("OPENAI_API_KEY", "CUSTOM_ENV"))
 
     def test_non_default_config_file_sets_environment_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -112,6 +125,50 @@ extra = ["/tmp/example"]
             project = Path(directory)
             (project / "arch-env.toml").write_text(
                 '[shell]\nforward_display = "yes"\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_invalid_forward_gpu_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                '[devices]\ngpu = "yes"\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_invalid_device_paths_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                "[devices]\npaths = [1]\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_invalid_env_passthrough_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                "[env]\npassthrough = [1]\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_invalid_env_passthrough_name_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                '[env]\npassthrough = ["BAD=VALUE"]\n',
                 encoding="utf-8",
             )
 

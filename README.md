@@ -9,6 +9,11 @@ The default mount policy is intentionally narrow. Only the current project
 directory is mounted read-write into the container. The host system is otherwise
 untouched.
 
+Interactive shells and `ae run` commands start as the `archenv` user. Common
+container-local install and cache directories are writable by that user's group,
+so development tools can install dependencies without writing to the host or
+creating root-owned project files.
+
 ## Requirements
 
 - Arch Linux or an Arch-derived host
@@ -88,9 +93,8 @@ is mounted at the same path inside the container. Exit with `exit` or `Ctrl-D`.
 ### `ae run <command> [args...]`
 
 Run a single command inside the environment and stream its output directly to the
-terminal, similar to `uv run`. The full host shell environment is forwarded with
-identity values normalised to the container user and container package paths
-prepended to `PATH`.
+terminal, similar to `uv run`. Only safe terminal defaults and environment
+variables explicitly listed in `[env].passthrough` are forwarded.
 
 ```bash
 ae run python --version
@@ -106,7 +110,8 @@ the shell environment before `ae run` sees it.
 
 Install one or more packages into an existing environment. Each package is
 checked against the official Arch repositories first; if not found there it is
-treated as an AUR package and installed via `yay`.
+checked against the AUR and installed via `yay`. If neither lookup succeeds,
+`ae install` stops with both package-resolution log paths.
 
 ```bash
 ae install jq
@@ -184,6 +189,13 @@ packages = []
 project = true   # mount the project directory read-write into the container
 extra = []       # additional host paths to mount at the same path inside the container
 
+[devices]
+gpu = false      # bind common GPU device nodes when they exist
+paths = []       # additional host device paths to bind at the same path
+
+[env]
+passthrough = [] # host environment variable names to forward into shell/run
+
 [shell]
 # forward_display = true  # forward X11/Wayland/audio/D-Bus to the host desktop
 ```
@@ -204,11 +216,41 @@ read-write at the same absolute path inside the container. Set to `false` to
 run the environment in a fully isolated root.
 
 `extra` — additional host paths to bind-mount at their same path inside the
-container. Supports `~` expansion.
+container. Supports `~` expansion. These paths are explicit host access and are
+not removed with the environment.
 
 ```toml
 [mounts]
 extra = ["~/fonts", "/media/data"]
+```
+
+### `[devices]`
+
+`gpu` — when `true`, bind common GPU device nodes that exist on the host, such
+as `/dev/dri`, `/dev/kfd`, and `/dev/nvidia*`.
+
+`paths` — additional host device paths to bind-mount at their same path inside
+the container. These are explicit host access and are not removed with the
+environment.
+
+```toml
+[devices]
+gpu = true
+paths = ["/dev/input/js0"]
+```
+
+The container user is added to mirrored host supplemental groups by numeric GID
+so explicitly forwarded devices can use normal Unix group permissions.
+
+### `[env]`
+
+`passthrough` — host environment variable names to forward into `ae shell` and
+`ae run`. Variables not listed here are not forwarded, which avoids accidental
+secret leakage.
+
+```toml
+[env]
+passthrough = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
 ```
 
 ### `[shell]`
@@ -246,6 +288,9 @@ The config file name determines the environment name:
 | `arch-env.toml` | `default` |
 | `tools.toml` | `tools` |
 | `python-tools.toml` | `python-tools` |
+
+Environment names must start with a letter or digit and contain only letters,
+digits, or dashes.
 
 Pass `--config/-c` to target a specific environment:
 
@@ -294,13 +339,42 @@ Every environment bootstraps `yay` regardless of whether AUR packages are
 configured, so `ae install <aur-package>` works at any time without additional
 setup. The bootstrap process:
 
-1. Installs `go` with root pacman (build dependency)
-2. Clones the `yay` AUR repository and runs `makepkg` as the container user
-3. Installs the built package with root pacman
-4. Grants the container user passwordless `sudo` access to `/usr/bin/pacman` only
+1. Grants the container user passwordless `sudo` access only for root-owned package-management helpers
+2. Installs `go` with root pacman (build dependency)
+3. Clones the `yay` AUR repository and runs `makepkg` as the container user
+4. Installs the built `yay` package with root pacman
+5. Verifies `yay --version` as the container user
 
 This means AUR builds run as the non-root `archenv` user but installation
 is handled by root pacman — `makepkg` never prompts for a password.
+
+## Container Privileges
+
+Interactive shells and `ae run` commands start as the `archenv` user. Common
+container-local install and cache directory trees under `/usr/local`, `/usr/lib`,
+`/usr/share`, `/usr/include`, `/opt`, and `/var/cache` are group-writable for
+that user inside the isolated root, so normal developer commands can install
+there without `sudo`:
+
+```bash
+bundle install
+npm install -g typescript
+pip install --prefix=/usr/local some-tool
+```
+
+Those commands modify the isolated container root, not the host system. The
+project directory and any explicit host mounts remain real host paths, and
+commands run as the mapped `archenv` user keep project file ownership aligned
+with the host user.
+
+Only directory permissions are changed; package-owned file contents and file
+modes are not recursively rewritten. Package-manager transactions temporarily
+restore package-style directory modes on the managed development prefixes before
+invoking pacman, then reapply developer write access afterward. Failures in that
+repair step are reported as command failures instead of being silently ignored.
+The `pacman` and `yay` commands available in the shell are wrappers; privileged
+operations are delegated only to root-owned helpers under `/usr/libexec/arch-env`,
+not to writable `/usr/local` paths.
 
 ## Shell Appearance
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import tomllib
 
 from arch_env.errors import ConfigError, PathSafetyError
@@ -10,6 +11,7 @@ from arch_env.paths import validate_environment_name
 
 CONFIG_FILE = "arch-env.toml"
 DEFAULT_ENVIRONMENT_NAME = "default"
+ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_BOOTSTRAP_PACKAGES = [
     "base",
     "base-devel",
@@ -37,6 +39,13 @@ packages = []
 project = true
 extra = []
 
+[devices]
+gpu = false
+paths = []
+
+[env]
+passthrough = []
+
 [shell]
 # forward_display = true  # forward X11/Wayland/audio/D-Bus sockets to the host desktop
 """
@@ -50,6 +59,9 @@ class ArchEnvConfig:
     aur_packages: tuple[str, ...]
     mount_project: bool
     extra_mounts: tuple[Path, ...]
+    forward_gpu: bool = False
+    device_paths: tuple[Path, ...] = ()
+    env_passthrough: tuple[str, ...] = ()
     forward_display: bool = False
 
 
@@ -63,6 +75,9 @@ def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvCo
             aur_packages=(),
             mount_project=True,
             extra_mounts=(),
+            forward_gpu=False,
+            device_paths=(),
+            env_passthrough=(),
         )
 
     try:
@@ -77,6 +92,8 @@ def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvCo
     pacman = _table(raw, "pacman")
     aur = _table(raw, "aur")
     mounts = _table(raw, "mounts")
+    devices = _table(raw, "devices")
+    env = _table(raw, "env")
     shell = _table(raw, "shell")
 
     mount_project = mounts.get("project", True)
@@ -87,6 +104,10 @@ def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvCo
     if not isinstance(forward_display, bool):
         raise ConfigError("[shell].forward_display must be a boolean")
 
+    forward_gpu = devices.get("gpu", False)
+    if not isinstance(forward_gpu, bool):
+        raise ConfigError("[devices].gpu must be a boolean")
+
     return ArchEnvConfig(
         environment_name=environment_name_from_config_path(config_path),
         config_path=config_path,
@@ -94,6 +115,9 @@ def load_config(project_dir: Path, config_file: Path | None = None) -> ArchEnvCo
         aur_packages=_string_tuple(aur.get("packages", ()), "[aur].packages"),
         mount_project=mount_project,
         extra_mounts=_path_tuple(mounts.get("extra", ()), "[mounts].extra"),
+        forward_gpu=forward_gpu,
+        device_paths=_path_tuple(devices.get("paths", ()), "[devices].paths"),
+        env_passthrough=_environment_variable_tuple(env.get("passthrough", ()), "[env].passthrough"),
         forward_display=forward_display,
     )
 
@@ -143,3 +167,11 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
 
 def _path_tuple(value: object, key: str) -> tuple[Path, ...]:
     return tuple(Path(item).expanduser() for item in _string_tuple(value, key))
+
+
+def _environment_variable_tuple(value: object, key: str) -> tuple[str, ...]:
+    names = _string_tuple(value, key)
+    for name in names:
+        if not ENVIRONMENT_VARIABLE_PATTERN.fullmatch(name):
+            raise ConfigError(f"{key} must contain only valid environment variable names")
+    return names

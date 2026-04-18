@@ -8,7 +8,7 @@ from arch_env.errors import PathSafetyError
 
 
 STATE_DIR_NAME = ".arch-env"
-ENV_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ def validate_environment_name(name: str) -> str:
     if not ENV_NAME_PATTERN.fullmatch(name):
         raise PathSafetyError(
             "Environment names must start with a letter or digit and contain "
-            "only letters, digits, dots, underscores, or dashes."
+            "only letters, digits, or dashes."
         )
     if name in {".", ".."}:
         raise PathSafetyError("Environment name cannot be '.' or '..'")

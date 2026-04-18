@@ -10,10 +10,10 @@ from arch_env.paths import build_environment_paths, ensure_managed_environment_p
 
 class PathTests(unittest.TestCase):
     def test_valid_environment_name(self) -> None:
-        self.assertEqual(validate_environment_name("dev-1.test"), "dev-1.test")
+        self.assertEqual(validate_environment_name("dev-1"), "dev-1")
 
     def test_environment_name_rejects_traversal(self) -> None:
-        for name in ("../prod", "/prod", ".hidden", "bad/name", ""):
+        for name in ("../prod", "/prod", ".hidden", "bad/name", "bad_name", "bad.name", ""):
             with self.subTest(name=name):
                 with self.assertRaises(PathSafetyError):
                     validate_environment_name(name)
