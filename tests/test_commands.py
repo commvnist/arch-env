@@ -13,10 +13,11 @@ from arch_env.commands import (
     ARCH_ENV_PACMAN_HELPER,
     configure_container_sudo_command,
     configure_developer_write_access_command,
-    configure_package_manager_wrappers_command,
+    configure_package_manager_helpers_command,
     container_term,
     create_container_user_command,
     DEVELOPER_WRITABLE_PREFIXES,
+    developer_tool_environment,
     developer_write_access_script,
     device_bind_mounts,
     display_bind_mounts,
@@ -26,17 +27,17 @@ from arch_env.commands import (
     host_supplemental_group_ids,
     host_user_id,
     initialize_keyring_command,
+    machine_name,
     nspawn_command,
     pacman_install_command,
     pacman_helper_script,
     pacstrap_command,
     restore_package_manager_directory_modes_command,
-    pacman_wrapper_script,
     safe_shell_environment,
     shell_command,
     install_built_yay_command,
     verify_yay_command,
-    yay_wrapper_script,
+    yay_install_command,
     yay_bootstrap_dependencies_command,
 )
 from arch_env.paths import build_environment_paths
@@ -67,9 +68,19 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--bind", command)
         self.assertIn("--background=", command)
         self.assertIn(f"{paths.project_dir}:{paths.project_dir}", command)
+        self.assertIn(machine_name(paths), command)
         self.assertIn("--user", command)
         self.assertIn("archenv", command)
         self.assertEqual(command[-2:], ["bash", "-l"])
+
+    def test_machine_name_includes_project_hash_and_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = build_environment_paths(Path(directory), "dev")
+
+            name = machine_name(paths)
+
+        self.assertTrue(name.startswith("archenv-dev-"))
+        self.assertLessEqual(len(name), 64)
 
     def test_nspawn_command_mounts_explicit_extra_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -120,6 +131,8 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(env["PATH"], "/usr/local/sbin:/usr/local/bin:/usr/bin")
         self.assertEqual(env["USER"], "archenv")
         self.assertEqual(env["HOME"], "/home/archenv")
+        self.assertEqual(env["GEM_HOME"], "/opt/arch-env/ruby/gems")
+        self.assertEqual(env["NPM_CONFIG_PREFIX"], "/usr/local")
         self.assertNotIn("SSH_AUTH_SOCK", env)
         self.assertNotIn("TOKEN", env)
 
@@ -150,6 +163,14 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("TOKEN", env)
         self.assertNotIn("SUDO_UID", env)
         self.assertNotIn("PWD", env)
+
+    def test_developer_tool_environment_targets_writable_prefixes(self) -> None:
+        env = developer_tool_environment()
+
+        self.assertEqual(env["BUNDLE_PATH"], "/opt/arch-env/ruby/bundle")
+        self.assertEqual(env["CARGO_HOME"], "/opt/arch-env/cargo")
+        self.assertEqual(env["GOPATH"], "/opt/arch-env/go")
+        self.assertEqual(env["UV_CACHE_DIR"], "/var/cache/arch-env/uv")
 
     def test_forwarded_run_environment_uses_supported_term_for_kitty(self) -> None:
         env = forwarded_run_environment({"TERM": "xterm-kitty", "PATH": "/usr/bin"})
@@ -208,10 +229,11 @@ class CommandTests(unittest.TestCase):
     def test_container_sudo_command_grants_only_package_management_access(self) -> None:
         command = configure_container_sudo_command()
 
-        self.assertIn("NOPASSWD: /usr/bin/pacman", command[2])
         self.assertIn(ARCH_ENV_PACMAN_HELPER, command[2])
         self.assertIn(ARCH_ENV_PACKAGE_MANAGER_MODES, command[2])
         self.assertIn(ARCH_ENV_DEVELOPER_WRITE_ACCESS, command[2])
+        self.assertIn("visudo -cf", command[2])
+        self.assertNotIn("NOPASSWD: /usr/bin/pacman", command[2])
         self.assertNotIn("/usr/local/bin/pacman", command[2])
         self.assertNotIn("/usr/local/lib/arch-env", command[2])
         self.assertNotIn("NOPASSWD: ALL", command[2])
@@ -224,11 +246,11 @@ class CommandTests(unittest.TestCase):
 
         self.assertNotIn("/usr/libexec", DEVELOPER_WRITABLE_PREFIXES)
         self.assertIn("/usr/local", command[2])
-        self.assertIn("/usr/lib", command[2])
-        self.assertIn("/usr/share", command[2])
-        self.assertIn("/usr/include", command[2])
-        self.assertIn("/opt", command[2])
-        self.assertIn("/var/cache", command[2])
+        self.assertIn("/opt/arch-env", command[2])
+        self.assertIn("/var/cache/arch-env", command[2])
+        self.assertNotIn("/usr/share", command[2])
+        self.assertNotIn("/usr/include", command[2])
+        self.assertNotIn("/var/cache ", command[2])
         self.assertIn("find \"$path\" -type d -exec chgrp 1000", command[2])
         self.assertIn("find \"$path\" -type d -exec chmod g+rwx,g+s", command[2])
         self.assertNotIn("chgrp -R", command[2])
@@ -239,58 +261,47 @@ class CommandTests(unittest.TestCase):
         command = restore_package_manager_directory_modes_command()
 
         self.assertIn("/usr/local", command[2])
-        self.assertIn("/usr/lib", command[2])
-        self.assertIn("/usr/share", command[2])
+        self.assertIn("/opt/arch-env", command[2])
+        self.assertIn("/var/cache/arch-env", command[2])
+        self.assertNotIn("/usr/share", command[2])
+        self.assertNotIn("/usr/include", command[2])
         self.assertIn("find \"$path\" -type d -exec chmod go-w,g-s", command[2])
         self.assertNotIn("chmod -R", command[2])
         self.assertNotIn("/home/naek/Projects", command[2])
 
-    def test_package_manager_wrappers_restore_and_reapply_modes(self) -> None:
-        command = configure_package_manager_wrappers_command(gid=1000)
+    def test_package_manager_helpers_restore_and_reapply_modes(self) -> None:
+        command = configure_package_manager_helpers_command(gid=1000)
 
         self.assertIn(ARCH_ENV_HELPER_DIR, command[2])
         self.assertIn(ARCH_ENV_PACMAN_HELPER, command[2])
         self.assertIn(ARCH_ENV_PACKAGE_MANAGER_MODES, command[2])
         self.assertIn(ARCH_ENV_DEVELOPER_WRITE_ACCESS, command[2])
-        self.assertIn("/usr/local/bin/pacman", command[2])
-        self.assertIn("/usr/local/bin/yay", command[2])
+        self.assertNotIn("/usr/local/bin/pacman", command[2])
+        self.assertNotIn("/usr/local/bin/yay", command[2])
         self.assertIn("/usr/bin/pacman \"$@\"", command[2])
-        self.assertIn("/usr/bin/yay \"$@\"", command[2])
         self.assertNotIn("/usr/local/lib/arch-env", command[2])
         self.assertIn("find \"$path\" -type d -exec chmod go-w,g-s", command[2])
         self.assertIn("find \"$path\" -type d -exec chmod g+rwx,g+s", command[2])
         self.assertNotIn("chmod -R", command[2])
         self.assertNotIn("|| true", command[2])
 
-    def test_wrapper_scripts_fail_when_developer_write_access_cannot_be_restored(self) -> None:
+    def test_pacman_helper_fails_when_developer_write_access_cannot_be_restored(self) -> None:
         self.assertIn("failed to restore developer write access after pacman", pacman_helper_script())
-        self.assertIn("failed to restore developer write access after yay", yay_wrapper_script())
         self.assertNotIn("|| true", pacman_helper_script())
-        self.assertNotIn("|| true", pacman_wrapper_script())
-        self.assertNotIn("|| true", yay_wrapper_script())
 
-    def test_pacman_wrapper_delegates_only_to_root_owned_helper(self) -> None:
-        script = pacman_wrapper_script()
+    def test_yay_install_command_uses_root_owned_pacman_helper(self) -> None:
+        command = yay_install_command(("paru-bin",))
 
-        self.assertIn(ARCH_ENV_PACMAN_HELPER, script)
-        self.assertIn(f"exec sudo {ARCH_ENV_PACMAN_HELPER}", script)
-        self.assertIn(f"exec {ARCH_ENV_PACMAN_HELPER}", script)
-        self.assertNotIn("/usr/local/bin/pacman", script)
-        self.assertNotIn("/usr/local/lib/arch-env", script)
-
-    def test_yay_wrapper_uses_root_owned_permission_helpers(self) -> None:
-        script = yay_wrapper_script()
-
-        self.assertIn(ARCH_ENV_PACKAGE_MANAGER_MODES, script)
-        self.assertIn(ARCH_ENV_DEVELOPER_WRITE_ACCESS, script)
-        self.assertNotIn("/usr/local/lib/arch-env", script)
+        self.assertEqual(command[:3], ["/usr/bin/yay", "--pacman", ARCH_ENV_PACMAN_HELPER])
+        self.assertIn("paru-bin", command)
 
     def test_developer_write_access_script_is_small_and_explicit(self) -> None:
         script = developer_write_access_script(1000)
 
         self.assertIn("#!/bin/sh", script)
         self.assertIn("/usr/local", script)
-        self.assertIn("/usr/lib", script)
+        self.assertIn("/opt/arch-env", script)
+        self.assertNotIn("/usr/share", script)
         self.assertNotIn("BUNDLE", script)
         self.assertNotIn("GEM_HOME", script)
 
@@ -398,16 +409,28 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime_dir = Path(directory) / "runtime"
             runtime_dir.mkdir()
+            wayland_socket = runtime_dir / "wayland-1"
+            wayland_socket.touch()
+            pulse_dir = runtime_dir / "pulse"
+            pulse_dir.mkdir()
+            pulse_socket = pulse_dir / "native"
+            pulse_socket.touch()
+            dbus_socket = runtime_dir / "bus"
+            dbus_socket.touch()
             xauth = Path(directory) / ".Xauthority"
             xauth.touch()
 
             mounts = display_bind_mounts({
                 "XDG_RUNTIME_DIR": str(runtime_dir),
+                "WAYLAND_DISPLAY": "wayland-1",
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path={dbus_socket}",
                 "XAUTHORITY": str(xauth),
             })
 
         targets = [target for _, target in mounts]
-        self.assertIn(str(runtime_dir), targets)
+        self.assertIn(str(wayland_socket), targets)
+        self.assertIn(str(pulse_socket), targets)
+        self.assertIn(str(dbus_socket), targets)
         self.assertIn("/home/archenv/.Xauthority", targets)
 
     def test_display_bind_mounts_skips_missing_paths(self) -> None:

@@ -20,8 +20,17 @@ class PrerequisiteError(ArchEnvError):
 class CommandExecutionError(ArchEnvError):
     """Raised when an external command exits unsuccessfully."""
 
-    def __init__(self, message: str, *, command: list[str], returncode: int, log_path: str):
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: list[str],
+        returncode: int,
+        log_path: str,
+        display_command: str | None = None,
+    ):
         super().__init__(message)
         self.command = command
         self.returncode = returncode
         self.log_path = log_path
+        self.display_command = display_command

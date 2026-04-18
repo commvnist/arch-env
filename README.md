@@ -1,30 +1,31 @@
 # arch-env
 
 `arch-env` creates disposable Arch Linux development environments backed by
-`systemd-nspawn`. It is intended to feel like a Python virtualenv for Arch
-packages: install packages into an isolated root, work against the current
-project, and delete the environment when it is no longer needed.
+`systemd-nspawn`. It is intended to feel like a virtual environment for Arch
+packages and developer tools: create an isolated root, run commands against the
+current project, install extra packages when needed, and remove the environment
+when it is no longer useful.
 
-The default mount policy is intentionally narrow. Only the current project
-directory is mounted read-write into the container. The host system is otherwise
-untouched.
+The default host access is narrow. Only the current project directory is mounted
+read-write into the container. Extra mounts, device forwarding, display
+forwarding, and environment-variable passthrough are explicit config choices.
 
-Interactive shells and `ae run` commands start as the `archenv` user. Common
-container-local install and cache directories are writable by that user's group,
-so development tools can install dependencies without writing to the host or
-creating root-owned project files.
+Interactive shells and `ae run` commands start as the `archenv` user. The tool
+keeps official Arch and AUR package installation behind `ae install`, while
+developer package managers such as uv, Bundler, npm, Cargo, and Go modules get
+writable container-local prefixes by default.
 
 ## Requirements
 
 - Arch Linux or an Arch-derived host
-- `python` 3.11+
-- `uv`
+- Python 3.11+
 - `sudo`
 - `systemd-nspawn`
 - `pacman`
 - `pacstrap` from `arch-install-scripts`
+- `uv` for local development targets such as `make test`
 
-Install all host and Python dependencies at once:
+Install host and Python development dependencies:
 
 ```bash
 make deps
@@ -38,14 +39,11 @@ Install the `ae` and `arch-env` commands into your user PATH:
 make install
 ```
 
-This runs `uv tool install --force --reinstall .`. The `--reinstall` flag
-ensures the current local source is copied into uv's tool environment rather
-than only refreshing the command shim. Make sure `~/.local/bin` is on your
-`PATH` (uv's default tool bin directory).
+This runs `uv tool install --force --reinstall .`. Run `make install` again
+after source changes when using the installed tool. Make sure uv's tool bin
+directory, usually `~/.local/bin`, is on `PATH`.
 
-Run `make install` again after any source change to pick up the latest code.
-
-To uninstall:
+Uninstall:
 
 ```bash
 make uninstall
@@ -54,47 +52,56 @@ make uninstall
 ## Quick Start
 
 ```bash
-ae init          # write arch-env.toml
-ae create        # bootstrap the environment
+ae init
+ae create
 ae run python --version
-ae shell         # interactive shell inside the environment
-ae install jq    # install a package at any time
-ae remove        # delete the environment
+ae shell
+ae install jq
+ae remove
 ```
 
-Run `ae` with no arguments to open the interactive TUI.
+Run `ae` with no subcommand to open the interactive TUI.
 
 ## Commands
 
-All commands accept `--config/-c <file>` to target a specific config file and
-therefore a specific named environment (see [Multiple Environments](#multiple-environments)).
+All environment-targeting commands accept `--config/-c <file>`. The config file
+name determines the environment name.
 
-### `ae init`
+`ae init`
 
-Write a starter `arch-env.toml` in the current directory. Does nothing if the
-file already exists. Optionally opens the file in `$EDITOR` when run through the
-TUI.
+Writes a starter config file. It fails if the file already exists.
 
-### `ae create`
+`ae create [--replace]`
 
-Bootstrap a new environment: runs `pacstrap`, creates the container user,
-initialises the pacman keyring, installs configured packages, and bootstraps
-`yay` for AUR support. All steps are logged under
-`.arch-env/envs/<name>/logs/`.
+Creates the environment from an existing config. Creation runs `pacstrap`,
+creates the `archenv` user, initializes the pacman keyring, installs configured
+packages, bootstraps `yay`, and writes metadata under
+`.arch-env/envs/<name>/metadata.json`.
 
-If creation fails, the environment is marked `failed`. Fix the config and re-run
-`ae create` (delete the failed environment first with `ae remove`).
+If creation fails, the environment status becomes `failed`. Fix the issue and
+run either:
 
-### `ae shell`
+```bash
+ae remove
+ae create
+```
 
-Enter an interactive Bash session inside the environment. The project directory
-is mounted at the same path inside the container. Exit with `exit` or `Ctrl-D`.
+or:
 
-### `ae run <command> [args...]`
+```bash
+ae create --replace
+```
 
-Run a single command inside the environment and stream its output directly to the
-terminal, similar to `uv run`. Only safe terminal defaults and environment
-variables explicitly listed in `[env].passthrough` are forwarded.
+`ae shell`
+
+Starts an interactive Bash shell as `archenv`. The environment must have status
+`ready`.
+
+`ae run <command> [args...]`
+
+Runs a single command as `archenv`. The environment must have status `ready`.
+Only terminal defaults, developer package-manager defaults, display variables
+when enabled, and variables listed in `[env].passthrough` are forwarded.
 
 ```bash
 ae run python --version
@@ -102,77 +109,48 @@ ae run make test
 ae run -- bash -c "echo hello"
 ```
 
-Run `ae` (not `sudo ae`). The tool calls `sudo` internally for the specific
-container operations that need it; wrapping the whole command in `sudo` strips
-the shell environment before `ae run` sees it.
+Run `ae` as your normal user. The tool calls `sudo` internally for the specific
+host and container operations that need it.
 
-### `ae install <packages...>`
+`ae install <packages...>`
 
-Install one or more packages into an existing environment. Each package is
-checked against the official Arch repositories first; if not found there it is
-checked against the AUR and installed via `yay`. If neither lookup succeeds,
-`ae install` stops with both package-resolution log paths.
+Installs official repository and AUR packages into an existing `ready`
+environment. Each package is checked against official repositories first. Any
+remaining packages are checked against the AUR and installed with `yay`.
 
-```bash
-ae install jq
-ae install paru-bin neovim
-```
+Official Arch and AUR package installation is intentionally supported through
+`ae install`, not through direct `pacman` or `yay` use inside `ae shell`.
 
-### `ae remove`
+`ae remove`
 
-Delete the environment and all its state under `.arch-env/envs/<name>/`. Uses
-`sudo rm -rf` when the container root contains root-owned files.
+Deletes the environment under `.arch-env/envs/<name>/`. It marks metadata as
+`removing` before deletion when metadata is present, then falls back to
+`sudo rm -rf --one-file-system` if root-owned files block normal removal.
 
-### `ae list`
+`ae list`
 
-List all environments in the current project, one per line.
+Lists environments in the current project.
 
-### `ae info`
+`ae info`
 
-Print environment metadata as JSON: creation time, status, config snapshot,
-arch-env version, and all relevant paths.
+Prints metadata JSON for the selected environment.
 
-## Interactive TUI
+`ae doctor`
 
-Running `ae` with no subcommand opens a curses-based interactive interface.
+Checks host prerequisites, selected config validity, and environment state.
 
-```
-arch-env interactive
+`ae --version`
 
-Project    /home/user/myproject
-Config     arch-env.toml
-Env        default
-Path       /home/user/myproject/.arch-env/envs/default
-Status     ready
-
-[n] init    [c] create  [s] shell   [r] run
-[p] install [d] delete  [i] info    [f] config  [q] quit
-```
-
-| Key | Action |
-|-----|--------|
-| `n` | Create the config file (prompts to open in `$EDITOR`) |
-| `c` | Create the environment |
-| `s` | Enter an interactive shell (exits TUI) |
-| `r` | Run a command (prompts for command, then exits TUI) |
-| `p` | Install packages (prompts for package names) |
-| `d` | Delete the environment (requires typing `yes`) |
-| `i` | Show JSON metadata in a scrollable pager |
-| `f` | Switch to a different config file |
-| `q` | Quit |
-
-Long-running operations (create, install, remove) display progress lines, then
-wait for Enter before returning to the TUI. Shell and run replace the TUI
-process entirely via `exec`.
+Prints the installed `arch-env` version.
 
 ## Configuration
 
-`ae init` writes `arch-env.toml`. The complete set of options:
+`ae init` writes this config:
 
 ```toml
 # The environment name is derived from this file name.
-# arch-env.toml  →  .arch-env/envs/default
-# tools.toml     →  .arch-env/envs/tools
+# arch-env.toml creates .arch-env/envs/default
+# tools.toml creates .arch-env/envs/tools
 
 [pacman]
 packages = [
@@ -186,98 +164,90 @@ packages = [
 packages = []
 
 [mounts]
-project = true   # mount the project directory read-write into the container
-extra = []       # additional host paths to mount at the same path inside the container
+project = true
+extra = []
 
 [devices]
-gpu = false      # bind common GPU device nodes when they exist
-paths = []       # additional host device paths to bind at the same path
+gpu = false
+paths = []
 
 [env]
-passthrough = [] # host environment variable names to forward into shell/run
+passthrough = []
 
 [shell]
-# forward_display = true  # forward X11/Wayland/audio/D-Bus to the host desktop
+# forward_display = true  # forward X11/Wayland/audio/D-Bus sockets to the host desktop
+
+[developer]
+writable_prefixes = true
 ```
 
-### `[pacman]`
+Config parsing is strict. Unknown tables or keys, duplicate list values,
+whitespace-padded strings, invalid environment variable names, and missing
+mount/device paths are rejected. `create`, `shell`, `run`, and `install` require
+the config file to exist.
 
-`packages` — list of packages to install from the official Arch repositories
-during `ae create`. Packages are installed with `pacman -Syu`.
+`[pacman].packages`
 
-### `[aur]`
+Official repository packages installed during `ae create`.
 
-`packages` — list of AUR packages to install via `yay` during `ae create`.
+`[aur].packages`
 
-### `[mounts]`
+AUR packages installed during `ae create`.
 
-`project` — when `true` (the default), the project directory is mounted
-read-write at the same absolute path inside the container. Set to `false` to
-run the environment in a fully isolated root.
+`[mounts].project`
 
-`extra` — additional host paths to bind-mount at their same path inside the
-container. Supports `~` expansion. These paths are explicit host access and are
-not removed with the environment.
+Mounts the project directory read-write at the same absolute path inside the
+container. Defaults to `true`.
 
-```toml
-[mounts]
-extra = ["~/fonts", "/media/data"]
-```
+`[mounts].extra`
 
-### `[devices]`
+Additional host paths to bind-mount at the same path inside the container.
+Relative paths are resolved relative to the project directory. `~` is expanded.
+Every path must already exist.
 
-`gpu` — when `true`, bind common GPU device nodes that exist on the host, such
-as `/dev/dri`, `/dev/kfd`, and `/dev/nvidia*`.
+`[devices].gpu`
 
-`paths` — additional host device paths to bind-mount at their same path inside
-the container. These are explicit host access and are not removed with the
-environment.
+Binds common GPU device nodes that exist on the host, including `/dev/dri`,
+`/dev/kfd`, and `/dev/nvidia*`.
 
-```toml
-[devices]
-gpu = true
-paths = ["/dev/input/js0"]
-```
+`[devices].paths`
 
-The container user is added to mirrored host supplemental groups by numeric GID
-so explicitly forwarded devices can use normal Unix group permissions.
+Additional host device paths to bind-mount at the same path inside the
+container. Relative paths are resolved relative to the project directory. Every
+path must already exist.
 
-### `[env]`
+`[env].passthrough`
 
-`passthrough` — host environment variable names to forward into `ae shell` and
-`ae run`. Variables not listed here are not forwarded, which avoids accidental
-secret leakage.
+Host environment variable names to forward into `ae shell` and `ae run`.
+Variables not listed here are not forwarded.
 
-```toml
-[env]
-passthrough = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
-```
+`[shell].forward_display`
 
-### `[shell]`
+When `true`, forwards the host display/audio/session sockets that exist:
 
-`forward_display` — when `true`, `ae shell` and `ae run` forward the host
-display and audio stack into the container, enabling GUI applications to render
-on the host desktop. Disabled by default.
-
-What gets forwarded (each only if present on the host):
-
-| Subsystem | Socket | Environment variables |
-|-----------|--------|-----------------------|
+| Subsystem | Bound host path | Environment variables |
+|-----------|-----------------|-----------------------|
 | X11 | `/tmp/.X11-unix` | `DISPLAY`, `XAUTHORITY` |
-| Wayland | `$XDG_RUNTIME_DIR` | `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` |
-| PulseAudio / PipeWire | inside `XDG_RUNTIME_DIR` | `PULSE_SERVER` |
-| D-Bus session | inside `XDG_RUNTIME_DIR` | `DBUS_SESSION_BUS_ADDRESS` |
+| Wayland | `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` | `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` |
+| PulseAudio/PipeWire | `$XDG_RUNTIME_DIR/pulse/native` | `PULSE_SERVER` |
+| D-Bus session | parsed `unix:path=` socket | `DBUS_SESSION_BUS_ADDRESS` |
 
-Packages that GUI apps commonly need beyond their direct dependencies:
+`[developer].writable_prefixes`
 
-```toml
-[pacman]
-packages = [
-  ...
-  "libsm",       # Qt xcb platform plugin
-  "ttf-dejavu",  # fallback fonts
-]
-```
+Defaults to `true`. When enabled, arch-env prepares container-local writable
+prefixes for developer package managers:
+
+| Tool family | Defaults |
+|-------------|----------|
+| Python/uv/pip | `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `PYTHONUSERBASE` |
+| Ruby/Bundler/gem | `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_APP_CONFIG` |
+| Node/npm | `NPM_CONFIG_PREFIX=/usr/local` |
+| Rust/Cargo | `CARGO_HOME=/opt/arch-env/cargo` |
+| Go modules | `GOPATH`, `GOMODCACHE`, `GOCACHE` |
+
+Writable directory trees are limited to `/usr/local`, `/opt/arch-env`, and
+`/var/cache/arch-env`. Package-owned trees such as `/usr/lib`, `/usr/share`, and
+`/usr/include` are not made writable.
 
 ## Multiple Environments
 
@@ -289,10 +259,7 @@ The config file name determines the environment name:
 | `tools.toml` | `tools` |
 | `python-tools.toml` | `python-tools` |
 
-Environment names must start with a letter or digit and contain only letters,
-digits, or dashes.
-
-Pass `--config/-c` to target a specific environment:
+Environment names must match `[A-Za-z0-9][A-Za-z0-9-]{0,63}`.
 
 ```bash
 ae init --config tools.toml
@@ -301,146 +268,77 @@ ae run --config tools.toml jq --version
 ae shell --config tools.toml
 ```
 
-Environment names must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`.
-
-## Directory Layout
+## State, Logs, And Metadata
 
 ```
 .arch-env/
-└── envs/
-    └── default/
-        ├── root/              # container root filesystem (pacstrap output)
-        ├── cache/
-        │   ├── pacman/        # shared pacman package cache
-        │   └── aur/           # yay build and package cache
-        ├── logs/              # per-operation log files
-        └── metadata.json      # environment status and config snapshot
+`-- envs/
+    `-- default/
+        |-- root/
+        |-- cache/
+        |   |-- pacman/
+        |   `-- aur/
+        |-- logs/
+        `-- metadata.json
 ```
 
-Log files follow the pattern `<step>.log`, e.g. `bootstrap-pacstrap.log`,
-`install-pacman.log`, `bootstrap-yay-build.log`. Each log starts with the exact
-command that was run.
+Metadata contains `status`, `created_at`, `updated_at`, `last_error`,
+`arch_env_version`, paths, and a config snapshot. `shell`, `run`, and `install`
+only operate on environments with status `ready`.
 
-## Logs and Errors
+External command logs are written under `.arch-env/envs/<name>/logs/`. Each log
+starts with the command that was run. `--setenv` values are redacted in logs and
+user-facing command failures.
 
-Long-running operations print a progress line before each external command:
+## Package Management Model
 
-```
-==> Bootstrapping Arch root with pacstrap.
-==> Log: .arch-env/envs/default/logs/bootstrap-pacstrap.log
-```
+Every environment bootstraps `yay` so `ae install <aur-package>` works after
+creation. AUR builds run as the non-root `archenv` user.
 
-When a command fails, the error includes the command, exit code, and log path.
-Read the log to see the exact output from `pacstrap`, `pacman`, `makepkg`, etc.
+Root package operations use helpers installed under `/usr/libexec/arch-env`.
+The container sudoers entry grants `archenv` passwordless access only to those
+helpers, and the sudoers file is validated with `visudo -cf` before
+installation. The tool does not install writable `/usr/local/bin/pacman` or
+`/usr/local/bin/yay` wrappers.
 
-## AUR Bootstrap
-
-Every environment bootstraps `yay` regardless of whether AUR packages are
-configured, so `ae install <aur-package>` works at any time without additional
-setup. The bootstrap process:
-
-1. Grants the container user passwordless `sudo` access only for root-owned package-management helpers
-2. Installs `go` with root pacman (build dependency)
-3. Clones the `yay` AUR repository and runs `makepkg` as the container user
-4. Installs the built `yay` package with root pacman
-5. Verifies `yay --version` as the container user
-
-This means AUR builds run as the non-root `archenv` user but installation
-is handled by root pacman — `makepkg` never prompts for a password.
-
-## Container Privileges
-
-Interactive shells and `ae run` commands start as the `archenv` user. Common
-container-local install and cache directory trees under `/usr/local`, `/usr/lib`,
-`/usr/share`, `/usr/include`, `/opt`, and `/var/cache` are group-writable for
-that user inside the isolated root, so normal developer commands can install
-there without `sudo`:
-
-```bash
-bundle install
-npm install -g typescript
-pip install --prefix=/usr/local some-tool
-```
-
-Those commands modify the isolated container root, not the host system. The
-project directory and any explicit host mounts remain real host paths, and
-commands run as the mapped `archenv` user keep project file ownership aligned
-with the host user.
-
-Only directory permissions are changed; package-owned file contents and file
-modes are not recursively rewritten. Package-manager transactions temporarily
-restore package-style directory modes on the managed development prefixes before
-invoking pacman, then reapply developer write access afterward. Failures in that
-repair step are reported as command failures instead of being silently ignored.
-The `pacman` and `yay` commands available in the shell are wrappers; privileged
-operations are delegated only to root-owned helpers under `/usr/libexec/arch-env`,
-not to writable `/usr/local` paths.
-
-## Shell Appearance
-
-`ae shell` starts a clean interactive Bash session. It does not clone the host
-prompt theme. Terminal capability variables (`TERM`, `COLORTERM`) are forwarded,
-and the prompt explicitly resets terminal styles to avoid bleeding colour
-sequences from nspawn's startup.
-
-Host-specific terminal names that lack a matching terminfo entry in the base Arch
-root are normalised: `TERM=xterm-kitty` becomes `TERM=xterm-256color` while
-`COLORTERM=truecolor` is preserved.
+Before a package transaction, arch-env temporarily restores package-manager
+directory modes on its managed writable prefixes. After the transaction, it
+reapplies developer write access when `[developer].writable_prefixes` is enabled.
 
 ## Development
 
-### Running Tests
+Run unit tests:
 
 ```bash
 make test
 ```
 
-Tests use the standard library `unittest` runner via `uv run`. No external test
-framework is required.
+Run the dry-run smoke plan without sudo or network access:
 
-### Project Structure
-
-```
-src/arch_env/
-├── __init__.py       # version
-├── __main__.py       # python -m arch_env entry point
-├── cli.py            # Typer CLI definition
-├── commands.py       # systemd-nspawn and shell command builders
-├── config.py         # TOML config parsing and ArchEnvConfig dataclass
-├── environment.py    # EnvironmentManager — create/shell/run/install/remove
-├── errors.py         # exception types
-├── paths.py          # EnvironmentPaths and directory layout
-├── prerequisites.py  # host dependency checks
-├── runner.py         # subprocess wrapper with log file output
-└── tui.py            # curses interactive interface
-
-tests/
-├── test_cli.py
-├── test_commands.py
-├── test_config.py
-├── test_environment.py
-├── test_paths.py
-├── test_runner.py
-└── test_tui.py
+```bash
+make smoke-dry-run
 ```
 
-### Makefile Targets
+Run the real smoke test on an Arch host with sudo and network access:
 
-| Target | Description |
-|--------|-------------|
-| `make deps` | Install host packages and sync Python dependencies |
-| `make install` | Install `ae`/`arch-env` into `~/.local/bin` via uv |
-| `make reinstall` | Alias for install |
-| `make uninstall` | Remove the uv tool install |
-| `make test` | Run the test suite |
+```bash
+make smoke
+```
+
+The smoke test creates a temporary project, creates an environment, installs
+`python`, `uv`, `ruby`, `ruby-bundler`, `nodejs`, `npm`, `rust`, and `go`, then
+runs dependency-backed Hello World programs through Python/uv, Ruby
+Bundler/gem, Node/npm, Rust/Cargo, and Go modules. It removes the environment at
+the end and prints log paths if a step fails.
+
+`make check` runs unit tests and the smoke dry-run.
 
 ## Limitations
 
-- Package versions follow current Arch repository and AUR state. Version pinning
-  is not yet supported.
-- AUR package builds execute arbitrary build scripts inside the container; trust
-  the packages you install.
-- Deleting an environment removes state inside the container root but cannot undo
-  writes made to mounted host paths such as the project directory.
-- The host must be running Arch Linux or an Arch-derived distribution.
-  `pacstrap` and `pacman` are not available on other distributions.
+- Package versions follow current Arch repositories and AUR state. Version
+  pinning is not supported.
+- AUR package builds execute arbitrary package build scripts inside the
+  container. Trust the packages you install.
+- Removing an environment cannot undo writes made to mounted host paths such as
+  the project directory or explicitly configured extra mounts.
+- The host must be Arch Linux or Arch-derived.

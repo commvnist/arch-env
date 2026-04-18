@@ -23,3 +23,9 @@ paths = []
 
 [env]
 passthrough = []
+
+[shell]
+# forward_display = true  # forward X11/Wayland/audio/D-Bus sockets to the host desktop
+
+[developer]
+writable_prefixes = true

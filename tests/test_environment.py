@@ -24,9 +24,16 @@ def _config(**kwargs: object) -> ArchEnvConfig:
         "device_paths": (),
         "env_passthrough": (),
         "forward_display": False,
+        "developer_writable_prefixes": True,
     }
     defaults.update(kwargs)
     return ArchEnvConfig(**defaults)  # type: ignore[arg-type]
+
+
+def _write_ready_metadata(manager: EnvironmentManager, name: str, config: ArchEnvConfig) -> None:
+    paths = manager.paths(name)
+    paths.env_dir.mkdir(parents=True)
+    manager._write_metadata(paths, config, status="ready")
 
 
 class EnvironmentMetadataTests(unittest.TestCase):
@@ -49,6 +56,8 @@ class EnvironmentMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["config"]["extra_mounts"], [str(project / "cache")])
         self.assertEqual(metadata["config"]["device_paths"], [str(project / "device")])
         self.assertEqual(metadata["status"], "ready")
+        self.assertIn("updated_at", metadata)
+        self.assertIsNone(metadata["last_error"])
 
     def test_create_marks_failed_environment_when_external_command_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -65,6 +74,7 @@ class EnvironmentMetadataTests(unittest.TestCase):
             metadata = json.loads(paths.metadata_path.read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["status"], "failed")
+        self.assertEqual(metadata["last_error"], "failed")
 
     def test_bootstrap_user_does_not_mount_package_caches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -93,14 +103,14 @@ class EnvironmentMetadataTests(unittest.TestCase):
         commands = [" ".join(command) for command in runner.commands]
         keyring_command = commands[2]
         install_command = next(command for command in commands if "/usr/bin/pacman --noconfirm -Syu jq" in command)
-        yay_sudo_command = next(command for command in commands if "NOPASSWD: /usr/bin/pacman" in command)
+        yay_sudo_command = next(command for command in commands if "NOPASSWD: /usr/libexec/arch-env/pacman" in command)
         yay_deps_command = next(command for command in commands if "pacman --noconfirm -S --needed go" in command)
         yay_build_command = next(command for command in commands if "git clone https://aur.archlinux.org/yay.git" in command)
         yay_install_command = next(command for command in commands if "pacman --noconfirm -U" in command)
         yay_verify_command = next(command for command in runner.commands if command[-2:] == ["/usr/bin/yay", "--version"])
         self.assertIn("pacman-key --init", keyring_command)
         self.assertIn("/usr/bin/pacman --noconfirm -Syu jq", install_command)
-        self.assertIn("NOPASSWD: /usr/bin/pacman", yay_sudo_command)
+        self.assertIn("NOPASSWD: /usr/libexec/arch-env/pacman", yay_sudo_command)
         self.assertIn("pacman --noconfirm -S --needed go", yay_deps_command)
         self.assertIn("git clone https://aur.archlinux.org/yay.git", yay_build_command)
         self.assertIn("pacman --noconfirm -U", yay_install_command)
@@ -154,10 +164,8 @@ class EnvironmentMetadataTests(unittest.TestCase):
             project = Path(directory)
             runner = ExecStoppingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
             config = _config(config_path=project / "dev.toml")
+            _write_ready_metadata(manager, "dev", config)
 
             with patch("arch_env.environment.os.execvpe", side_effect=RuntimeError("stop")) as execvpe:
                 with self.assertRaises(RuntimeError):
@@ -166,10 +174,10 @@ class EnvironmentMetadataTests(unittest.TestCase):
         executed_command = execvpe.call_args.args[1]
         commands = [" ".join(command) for command in runner.commands]
         self.assertIn("useradd", commands[0])
-        self.assertIn("NOPASSWD: /usr/bin/pacman", commands[1])
+        self.assertIn("NOPASSWD: /usr/libexec/arch-env/pacman", commands[1])
         self.assertIn("find \"$path\" -type d -exec chmod g+rwx,g+s", commands[2])
         self.assertIn(ARCH_ENV_HELPER_DIR, commands[3])
-        self.assertIn("/usr/local/bin/pacman", commands[3])
+        self.assertNotIn("/usr/local/bin/pacman", commands[3])
         self.assertIn("shell-user-check.log", str(runner.log_paths[0]))
         self.assertIn("--user", executed_command)
         self.assertIn("archenv", executed_command)
@@ -179,10 +187,8 @@ class EnvironmentMetadataTests(unittest.TestCase):
             project = Path(directory)
             runner = ExecStoppingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
             config = _config(config_path=project / "dev.toml")
+            _write_ready_metadata(manager, "dev", config)
 
             with patch("arch_env.environment.os.execvpe", side_effect=RuntimeError("stop")) as execvpe:
                 with self.assertRaises(RuntimeError):
@@ -191,10 +197,10 @@ class EnvironmentMetadataTests(unittest.TestCase):
         executed_command = execvpe.call_args.args[1]
         commands = [" ".join(command) for command in runner.commands]
         self.assertIn("useradd", commands[0])
-        self.assertIn("NOPASSWD: /usr/bin/pacman", commands[1])
+        self.assertIn("NOPASSWD: /usr/libexec/arch-env/pacman", commands[1])
         self.assertIn("find \"$path\" -type d -exec chmod g+rwx,g+s", commands[2])
         self.assertIn(ARCH_ENV_HELPER_DIR, commands[3])
-        self.assertIn("/usr/local/bin/pacman", commands[3])
+        self.assertNotIn("/usr/local/bin/pacman", commands[3])
         self.assertIn("run-user-check.log", str(runner.log_paths[0]))
         self.assertIn("--user", executed_command)
         self.assertIn("archenv", executed_command)
@@ -204,36 +210,37 @@ class EnvironmentMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             runner = RecordingRunner()
-            manager = EnvironmentManager(project, runner=runner)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
+            messages: list[str] = []
+            manager = EnvironmentManager(project, runner=runner, progress=messages.append)
+            config = _config(config_path=project / "dev.toml")
+            _write_ready_metadata(manager, "dev", config)
 
             with patch("arch_env.environment.validate_host_prerequisites"):
-                manager.install("dev", ("jq",))
+                manager.install("dev", config, ("jq",))
 
         commands = [" ".join(command) for command in runner.commands]
         self.assertIn("useradd", commands[0])
-        self.assertIn("NOPASSWD: /usr/bin/pacman", commands[1])
+        self.assertIn("NOPASSWD: /usr/libexec/arch-env/pacman", commands[1])
         self.assertIn("find \"$path\" -type d -exec chmod go-w,g-s", commands[2])
         self.assertTrue(any("/usr/bin/pacman -Si jq" in command for command in commands))
         self.assertTrue(any("/usr/bin/pacman --noconfirm -Syu jq" in command for command in commands))
         self.assertTrue(any(ARCH_ENV_HELPER_DIR in command for command in commands))
-        self.assertTrue(any("/usr/local/bin/pacman" in command for command in commands))
+        self.assertFalse(any("/usr/local/bin/pacman" in command for command in commands))
         self.assertTrue(any("find \"$path\" -type d -exec chmod g+rwx,g+s" in command for command in commands))
+        self.assertEqual(messages.count("Checking official repositories for jq."), 1)
+        self.assertNotIn("Checking official repositories for jq", messages)
 
     def test_install_fails_when_package_cannot_be_resolved_in_pacman_or_aur(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             runner = PackageResolutionFailingRunner()
             manager = EnvironmentManager(project, runner=runner)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
+            config = _config(config_path=project / "dev.toml")
+            _write_ready_metadata(manager, "dev", config)
 
             with patch("arch_env.environment.validate_host_prerequisites"):
                 with self.assertRaises(ArchEnvError) as context:
-                    manager.install("dev", ("missing-package",))
+                    manager.install("dev", config, ("missing-package",))
 
         self.assertIn("Could not resolve package 'missing-package'", str(context.exception))
         self.assertIn("package-resolution.log", str(context.exception))
@@ -245,13 +252,11 @@ class EnvironmentMetadataTests(unittest.TestCase):
             runtime_dir = Path(directory) / "runtime"
             runtime_dir.mkdir()
             manager = EnvironmentManager(project)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
             config = _config(
                 config_path=project / "dev.toml",
                 forward_display=True,
             )
+            _write_ready_metadata(manager, "dev", config)
 
             captured: list[list[str]] = []
 
@@ -279,14 +284,12 @@ class EnvironmentMetadataTests(unittest.TestCase):
             device = project / "device"
             device.touch()
             manager = EnvironmentManager(project)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
             config = _config(
                 config_path=project / "dev.toml",
                 device_paths=(device,),
                 env_passthrough=("CUSTOM_TOKEN",),
             )
+            _write_ready_metadata(manager, "dev", config)
 
             captured: list[list[str]] = []
 
@@ -308,10 +311,8 @@ class EnvironmentMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             manager = EnvironmentManager(project)
-            paths = manager.paths("dev")
-            paths.env_dir.mkdir(parents=True)
-            paths.metadata_path.write_text("{}", encoding="utf-8")
             config = _config(config_path=project / "dev.toml")
+            _write_ready_metadata(manager, "dev", config)
 
             captured: list[list[str]] = []
 

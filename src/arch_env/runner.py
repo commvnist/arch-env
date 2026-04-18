@@ -24,13 +24,14 @@ class CommandRunner:
     def run(self, command: list[str], *, log_path: Path, check: bool = True) -> CommandResult:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         started_at = datetime.now(UTC).isoformat()
+        display_command = render_command(command)
         LOGGER.info(
             "running command",
-            extra={"command": shlex.join(command), "log_path": str(log_path)},
+            extra={"command": display_command, "log_path": str(log_path)},
         )
 
         with log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(f"\n[{started_at}] $ {shlex.join(command)}\n")
+            log_file.write(f"\n[{started_at}] $ {display_command}\n")
             log_file.flush()
             process = subprocess.run(
                 command,
@@ -50,6 +51,25 @@ class CommandRunner:
                 command=command,
                 returncode=process.returncode,
                 log_path=str(log_path),
+                display_command=display_command,
             )
 
         return CommandResult(command=command, returncode=process.returncode, log_path=log_path)
+
+
+def render_command(command: list[str]) -> str:
+    return shlex.join(redact_command(command))
+
+
+def redact_command(command: list[str]) -> list[str]:
+    return [_redact_argument(argument) for argument in command]
+
+
+def _redact_argument(argument: str) -> str:
+    if not argument.startswith("--setenv="):
+        return argument
+    prefix, _, value = argument.partition("=")
+    key, separator, _ = value.partition("=")
+    if not separator:
+        return argument
+    return f"{prefix}={key}=<redacted>"

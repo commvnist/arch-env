@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import curses
@@ -62,7 +63,10 @@ class InteractiveApp:
         screen.bkgd(" ", curses.color_pair(0))
         while True:
             self._draw(screen)
-            key = screen.getkey().lower()
+            key = screen.getkey()
+            if key == "KEY_RESIZE":
+                continue
+            key = key.lower()
             if key == "q":
                 return
             self._handle_key(screen, key)
@@ -91,7 +95,7 @@ class InteractiveApp:
                 self._show_info(screen)
             elif key == "f":
                 self._switch_config(screen)
-            elif key not in ("\n", "KEY_RESIZE"):
+            elif key != "\n":
                 self.message = f"Unknown key: {key}"
         except (ArchEnvError, CommandExecutionError, ValueError) as exc:
             self.message = str(exc)
@@ -116,7 +120,7 @@ class InteractiveApp:
 
     def _install(self, packages: str) -> None:
         package_names = tuple(shlex.split(packages))
-        paths = self.manager.install(self.config.environment_name, package_names)
+        paths = self.manager.install(self.config.environment_name, self.config, package_names)
         self.message = f"Installed packages into {self.config.environment_name}: {paths.env_dir}"
 
     def _remove(self) -> None:
@@ -139,7 +143,7 @@ class InteractiveApp:
             content = [str(exc)]
         self._pager(screen, content)
 
-    def _terminal_action(self, screen: curses.window, label: str, action: object) -> None:
+    def _terminal_action(self, screen: curses.window, label: str, action: Callable[[], None]) -> None:
         curses.endwin()
         print(label)
         try:
@@ -148,7 +152,7 @@ class InteractiveApp:
             input("Press Enter to return to ae...")
             screen.clear()
 
-    def _exec_action(self, screen: curses.window, label: str, action: object) -> None:
+    def _exec_action(self, screen: curses.window, label: str, action: Callable[[], None]) -> None:
         curses.endwin()
         print(label)
         action()

@@ -21,10 +21,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.device_paths, ())
         self.assertEqual(config.env_passthrough, ())
         self.assertFalse(config.forward_display)
+        self.assertTrue(config.developer_writable_prefixes)
+
+    def test_missing_required_config_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ConfigError):
+                load_config(Path(directory), require_existing=True)
 
     def test_valid_config_is_parsed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
+            (project / "cache").mkdir()
+            (project / "device").touch()
             (project / "arch-env.toml").write_text(
                 """
 [pacman]
@@ -35,14 +43,20 @@ packages = ["paru-bin"]
 
 [mounts]
 project = false
-extra = ["/tmp/example"]
+extra = ["cache"]
 
 [devices]
 gpu = true
-paths = ["/dev/example"]
+paths = ["device"]
 
 [env]
 passthrough = ["OPENAI_API_KEY", "CUSTOM_ENV"]
+
+[shell]
+forward_display = true
+
+[developer]
+writable_prefixes = false
 """,
                 encoding="utf-8",
             )
@@ -53,10 +67,12 @@ passthrough = ["OPENAI_API_KEY", "CUSTOM_ENV"]
         self.assertEqual(config.pacman_packages, ("git", "jq"))
         self.assertEqual(config.aur_packages, ("paru-bin",))
         self.assertFalse(config.mount_project)
-        self.assertEqual(config.extra_mounts, (Path("/tmp/example"),))
+        self.assertEqual(config.extra_mounts, ((project / "cache").resolve(),))
         self.assertTrue(config.forward_gpu)
-        self.assertEqual(config.device_paths, (Path("/dev/example"),))
+        self.assertEqual(config.device_paths, ((project / "device").resolve(),))
         self.assertEqual(config.env_passthrough, ("OPENAI_API_KEY", "CUSTOM_ENV"))
+        self.assertTrue(config.forward_display)
+        self.assertFalse(config.developer_writable_prefixes)
 
     def test_non_default_config_file_sets_environment_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -94,7 +110,39 @@ passthrough = ["OPENAI_API_KEY", "CUSTOM_ENV"]
     def test_environment_table_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
-            (project / "arch-env.toml").write_text("[environment]\nname = \"dev\"\n", encoding="utf-8")
+            (project / "arch-env.toml").write_text("[environment]\n", encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_unknown_table_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text("[unknown]\nvalue = true\n", encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_unknown_table_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text("[pacman]\nextra = []\n", encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_duplicate_package_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text('[pacman]\npackages = ["git", "git"]\n', encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_whitespace_padded_string_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text('[pacman]\npackages = [" git"]\n', encoding="utf-8")
 
             with self.assertRaises(ConfigError):
                 load_config(project)
@@ -153,6 +201,17 @@ passthrough = ["OPENAI_API_KEY", "CUSTOM_ENV"]
             with self.assertRaises(ConfigError):
                 load_config(project)
 
+    def test_missing_mount_path_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                '[mounts]\nextra = ["missing"]\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
     def test_invalid_env_passthrough_raises_config_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -169,6 +228,17 @@ passthrough = ["OPENAI_API_KEY", "CUSTOM_ENV"]
             project = Path(directory)
             (project / "arch-env.toml").write_text(
                 '[env]\npassthrough = ["BAD=VALUE"]\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(project)
+
+    def test_invalid_developer_writable_prefixes_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "arch-env.toml").write_text(
+                '[developer]\nwritable_prefixes = "yes"\n',
                 encoding="utf-8",
             )
 

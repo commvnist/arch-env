@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import os
 import pwd
+import re
 
 from arch_env.config import DEFAULT_BOOTSTRAP_PACKAGES, ENVIRONMENT_VARIABLE_PATTERN
 from arch_env.paths import EnvironmentPaths
@@ -21,15 +23,28 @@ ARCH_ENV_PACKAGE_MANAGER_MODES = f"{ARCH_ENV_HELPER_DIR}/package-manager-modes"
 ARCH_ENV_DEVELOPER_WRITE_ACCESS = f"{ARCH_ENV_HELPER_DIR}/developer-write-access"
 DEVELOPER_WRITABLE_PREFIXES = (
     "/usr/local",
-    "/usr/lib",
-    "/usr/share",
-    "/usr/include",
-    "/opt",
-    "/var/cache",
+    "/opt/arch-env",
+    "/var/cache/arch-env",
+)
+DEVELOPER_WRITABLE_DIRECTORIES = (
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/local/lib",
+    "/opt/arch-env/python",
+    "/opt/arch-env/ruby",
+    "/opt/arch-env/ruby/bundle",
+    "/opt/arch-env/ruby/gems",
+    "/opt/arch-env/cargo",
+    "/opt/arch-env/go",
+    "/var/cache/arch-env/bundle",
+    "/var/cache/arch-env/go-build",
+    "/var/cache/arch-env/pip",
+    "/var/cache/arch-env/uv",
 )
 TERM_FALLBACKS = {
     "xterm-kitty": "xterm-256color",
 }
+DBUS_PATH_PATTERN = re.compile(r"(?:^|,)path=([^,]+)")
 
 
 def pacstrap_command(paths: EnvironmentPaths) -> list[str]:
@@ -62,7 +77,7 @@ def nspawn_command(
         "--directory",
         str(paths.root_dir),
         "--machine",
-        f"arch-env-{paths.name}",
+        machine_name(paths),
     ]
     if project_mount:
         result.extend(["--bind", f"{paths.project_dir}:{paths.project_dir}"])
@@ -81,9 +96,16 @@ def nspawn_command(
     return result
 
 
+def machine_name(paths: EnvironmentPaths) -> str:
+    project_hash = hashlib.sha256(str(paths.project_dir).encode("utf-8")).hexdigest()[:12]
+    return f"archenv-{paths.name[:32]}-{project_hash}"
+
+
 def safe_shell_environment(
     host_env: dict[str, str] | None = None,
     passthrough: tuple[str, ...] = (),
+    *,
+    developer_writable_prefixes: bool = True,
 ) -> dict[str, str]:
     source = host_env if host_env is not None else os.environ
     allowed_keys = ("TERM", "COLORTERM", "NO_COLOR", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES")
@@ -94,15 +116,40 @@ def safe_shell_environment(
     result["USER"] = CONTAINER_USER
     result["HOME"] = f"/home/{CONTAINER_USER}"
     result["SHELL"] = "/bin/bash"
+    if developer_writable_prefixes:
+        result.update(developer_tool_environment())
     return result
 
 
 def forwarded_run_environment(
     host_env: dict[str, str] | None = None,
     passthrough: tuple[str, ...] = (),
+    *,
+    developer_writable_prefixes: bool = True,
 ) -> dict[str, str]:
     source = host_env if host_env is not None else os.environ
-    return safe_shell_environment(source, passthrough)
+    return safe_shell_environment(
+        source,
+        passthrough,
+        developer_writable_prefixes=developer_writable_prefixes,
+    )
+
+
+def developer_tool_environment() -> dict[str, str]:
+    return {
+        "BUNDLE_APP_CONFIG": "/var/cache/arch-env/bundle",
+        "BUNDLE_PATH": "/opt/arch-env/ruby/bundle",
+        "CARGO_HOME": "/opt/arch-env/cargo",
+        "GEM_HOME": "/opt/arch-env/ruby/gems",
+        "GEM_PATH": "/opt/arch-env/ruby/gems",
+        "GOCACHE": "/var/cache/arch-env/go-build",
+        "GOMODCACHE": "/opt/arch-env/go/pkg/mod",
+        "GOPATH": "/opt/arch-env/go",
+        "NPM_CONFIG_PREFIX": "/usr/local",
+        "PIP_CACHE_DIR": "/var/cache/arch-env/pip",
+        "PYTHONUSERBASE": "/opt/arch-env/python",
+        "UV_CACHE_DIR": "/var/cache/arch-env/uv",
+    }
 
 
 def explicit_passthrough_environment(source: dict[str, str], names: tuple[str, ...]) -> dict[str, str]:
@@ -174,12 +221,16 @@ def configure_container_sudo_command() -> list[str]:
         (
             "set -e; "
             "install -d -m 0750 /etc/sudoers.d; "
+            f"install -d -m 0755 {ARCH_ENV_HELPER_DIR}; "
+            f"tmp=$(mktemp /etc/sudoers.d/{CONTAINER_USER}.XXXXXX); "
+            "trap 'rm -f \"$tmp\"' EXIT; "
             f"printf '%s\\n' '{CONTAINER_USER} ALL=(root) NOPASSWD: "
-            f"/usr/bin/pacman, {ARCH_ENV_PACMAN_HELPER}, "
-            f"{ARCH_ENV_PACKAGE_MANAGER_MODES}, "
-            f"{ARCH_ENV_DEVELOPER_WRITE_ACCESS}' "
-            f"> /etc/sudoers.d/{CONTAINER_USER}; "
-            f"chmod 0440 /etc/sudoers.d/{CONTAINER_USER}"
+            f"{ARCH_ENV_PACMAN_HELPER}, {ARCH_ENV_PACKAGE_MANAGER_MODES}, "
+            f"{ARCH_ENV_DEVELOPER_WRITE_ACCESS}' > \"$tmp\"; "
+            "visudo -cf \"$tmp\"; "
+            f"install -m 0440 \"$tmp\" /etc/sudoers.d/{CONTAINER_USER}; "
+            "rm -f \"$tmp\"; "
+            "trap - EXIT"
         ),
     ]
 
@@ -201,24 +252,23 @@ def restore_package_manager_directory_modes_command() -> list[str]:
     ]
 
 
-def configure_package_manager_wrappers_command(gid: int | None = None) -> list[str]:
+def configure_package_manager_helpers_command(
+    gid: int | None = None,
+    *,
+    developer_writable_prefixes: bool = True,
+) -> list[str]:
     gid = gid if gid is not None else host_group_id()
     return [
         "sh",
         "-lc",
         (
             "set -e; "
-            f"install -d -m 0755 /usr/local/bin {ARCH_ENV_HELPER_DIR}; "
+            f"install -d -m 0755 {ARCH_ENV_HELPER_DIR}; "
             f"{_write_script_shell(ARCH_ENV_DEVELOPER_WRITE_ACCESS, developer_write_access_script(gid))} "
             f"{_write_script_shell(ARCH_ENV_PACKAGE_MANAGER_MODES, package_manager_modes_script())} "
-            f"{_write_script_shell(ARCH_ENV_PACMAN_HELPER, pacman_helper_script())} "
-            f"{_write_script_shell('/usr/local/bin/pacman', pacman_wrapper_script())} "
-            "if [ -x /usr/bin/yay ]; then "
-            f"{_write_script_shell('/usr/local/bin/yay', yay_wrapper_script())} "
-            "chmod 0755 /usr/local/bin/yay; "
-            "fi; "
+            f"{_write_script_shell(ARCH_ENV_PACMAN_HELPER, pacman_helper_script(developer_writable_prefixes))} "
             f"chmod 0755 {ARCH_ENV_DEVELOPER_WRITE_ACCESS} "
-            f"{ARCH_ENV_PACKAGE_MANAGER_MODES} {ARCH_ENV_PACMAN_HELPER} /usr/local/bin/pacman"
+            f"{ARCH_ENV_PACKAGE_MANAGER_MODES} {ARCH_ENV_PACMAN_HELPER}"
         ),
     ]
 
@@ -235,55 +285,33 @@ def package_manager_modes_script() -> str:
     return "#!/bin/sh\nset -e\n" + _restore_package_manager_directory_modes_shell()
 
 
-def pacman_helper_script() -> str:
-    return "\n".join(
-        (
-            "#!/bin/sh",
-            "set -u",
-            ARCH_ENV_PACKAGE_MANAGER_MODES,
-            '/usr/bin/pacman "$@"',
-            "status=$?",
-            f"if ! {ARCH_ENV_DEVELOPER_WRITE_ACCESS}; then",
-            "  printf '%s\\n' 'arch-env: failed to restore developer write access after pacman' >&2",
-            "  exit 1",
-            "fi",
-            'exit "$status"',
+def pacman_helper_script(developer_writable_prefixes: bool = True) -> str:
+    lines = [
+        "#!/bin/sh",
+        "set -u",
+        f"if ! {ARCH_ENV_PACKAGE_MANAGER_MODES}; then",
+        "  printf '%s\\n' 'arch-env: failed to restore package-manager modes before pacman' >&2",
+        "  exit 1",
+        "fi",
+        '/usr/bin/pacman "$@"',
+        "status=$?",
+    ]
+    if developer_writable_prefixes:
+        lines.extend(
+            [
+                f"if ! {ARCH_ENV_DEVELOPER_WRITE_ACCESS}; then",
+                "  printf '%s\\n' 'arch-env: failed to restore developer write access after pacman' >&2",
+                "  exit 1",
+                "fi",
+            ]
         )
-    )
-
-
-def pacman_wrapper_script() -> str:
-    return "\n".join(
-        (
-            "#!/bin/sh",
-            "set -u",
-            'if [ "$(id -u)" -eq 0 ]; then',
-            f'  exec {ARCH_ENV_PACMAN_HELPER} "$@"',
-            "fi",
-            f'exec sudo {ARCH_ENV_PACMAN_HELPER} "$@"',
-        )
-    )
-
-
-def yay_wrapper_script() -> str:
-    return "\n".join(
-        (
-            "#!/bin/sh",
-            "set -u",
-            f"sudo {ARCH_ENV_PACKAGE_MANAGER_MODES} || exit 1",
-            '/usr/bin/yay "$@"',
-            "status=$?",
-            f"if ! sudo {ARCH_ENV_DEVELOPER_WRITE_ACCESS}; then",
-            "  printf '%s\\n' 'arch-env: failed to restore developer write access after yay' >&2",
-            "  exit 1",
-            "fi",
-            'exit "$status"',
-        )
-    )
+    lines.append('exit "$status"')
+    return "\n".join(lines)
 
 
 def _developer_write_access_shell(gid: int) -> str:
     return (
+        f"install -d -g {gid} -m 2775 {' '.join(DEVELOPER_WRITABLE_DIRECTORIES)}; "
         f"for path in {' '.join(DEVELOPER_WRITABLE_PREFIXES)}; do "
         "[ -e \"$path\" ] || continue; "
         f"find \"$path\" -type d -exec chgrp {gid} {{}} +; "
@@ -367,7 +395,7 @@ def yay_query_command(package: str) -> list[str]:
 
 
 def yay_install_command(packages: tuple[str, ...] | list[str]) -> list[str]:
-    return ["/usr/bin/yay", "--noconfirm", "-S", *packages]
+    return ["/usr/bin/yay", "--pacman", ARCH_ENV_PACMAN_HELPER, "--noconfirm", "-S", *packages]
 
 
 def yay_bootstrap_dependencies_command() -> list[str]:
@@ -435,13 +463,33 @@ def display_bind_mounts(host_env: dict[str, str] | None = None) -> tuple[tuple[P
     if x11_socket_dir.exists():
         mounts.append((x11_socket_dir, "/tmp/.X11-unix"))
     xdg_runtime = source.get("XDG_RUNTIME_DIR")
-    if xdg_runtime and Path(xdg_runtime).exists():
-        mounts.append((Path(xdg_runtime), xdg_runtime))
+    if xdg_runtime:
+        runtime_dir = Path(xdg_runtime)
+        wayland_display = source.get("WAYLAND_DISPLAY")
+        if wayland_display:
+            wayland_socket = runtime_dir / wayland_display
+            if wayland_socket.exists():
+                mounts.append((wayland_socket, str(wayland_socket)))
+        pulse_socket = runtime_dir / "pulse" / "native"
+        if pulse_socket.exists():
+            mounts.append((pulse_socket, str(pulse_socket)))
+        dbus_socket = _dbus_session_bus_path(source.get("DBUS_SESSION_BUS_ADDRESS"))
+        if dbus_socket and dbus_socket.exists():
+            mounts.append((dbus_socket, str(dbus_socket)))
     xauthority_str = source.get("XAUTHORITY")
     xauthority = Path(xauthority_str) if xauthority_str else Path.home() / ".Xauthority"
     if xauthority.exists():
         mounts.append((xauthority, f"/home/{CONTAINER_USER}/.Xauthority"))
-    return tuple(mounts)
+    return _dedupe_bind_mounts(tuple(mounts))
+
+
+def _dbus_session_bus_path(address: str | None) -> Path | None:
+    if not address or not address.startswith("unix:"):
+        return None
+    match = DBUS_PATH_PATTERN.search(address.removeprefix("unix:"))
+    if not match:
+        return None
+    return Path(match.group(1))
 
 
 def device_bind_mounts(

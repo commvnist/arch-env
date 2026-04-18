@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict
-from datetime import datetime, UTC
 from pathlib import Path
-import json
 import os
 import shutil
 
-from arch_env import __version__
 from arch_env.commands import (
     CONTAINER_USER,
     build_yay_command,
     configure_container_sudo_command,
     configure_developer_write_access_command,
-    configure_package_manager_wrappers_command,
+    configure_package_manager_helpers_command,
     create_container_user_command,
     device_bind_mounts,
     display_bind_mounts,
@@ -36,6 +32,7 @@ from arch_env.commands import (
 )
 from arch_env.config import ArchEnvConfig
 from arch_env.errors import ArchEnvError, CommandExecutionError
+from arch_env.metadata import FAILED, READY, REMOVING, read_metadata, update_metadata_status, write_metadata
 from arch_env.paths import EnvironmentPaths, build_environment_paths, ensure_managed_environment_path
 from arch_env.prerequisites import validate_host_prerequisites
 from arch_env.runner import CommandRunner
@@ -55,12 +52,15 @@ class EnvironmentManager:
     def paths(self, name: str) -> EnvironmentPaths:
         return build_environment_paths(self.project_dir, name)
 
-    def create(self, name: str, config: ArchEnvConfig) -> EnvironmentPaths:
+    def create(self, name: str, config: ArchEnvConfig, *, replace: bool = False) -> EnvironmentPaths:
         self._progress(f"Validating host prerequisites for environment '{name}'.")
         validate_host_prerequisites()
         paths = self.paths(name)
-        if paths.metadata_path.exists():
+        if paths.env_dir.exists() and not replace:
             raise ArchEnvError(f"Environment already exists: {paths.env_dir}")
+        if paths.env_dir.exists():
+            self._progress(f"Replacing existing environment '{name}'.")
+            self._remove_paths(paths, config)
 
         self._progress(f"Creating environment '{name}' at {paths.env_dir}.")
         paths.root_dir.mkdir(parents=True, exist_ok=True)
@@ -93,24 +93,25 @@ class EnvironmentManager:
             )
 
             if config.pacman_packages:
-                self.install_pacman_packages(paths, config.pacman_packages)
+                self.install_pacman_packages(paths, config.pacman_packages, config=config)
             if config.aur_packages:
-                self.install_aur_packages(paths, config.aur_packages)
+                self.install_aur_packages(paths, config.aur_packages, config=config)
             else:
-                self.bootstrap_yay(paths)
-                self.configure_developer_write_access(paths)
-        except ArchEnvError:
-            self._write_metadata(paths, config, status="failed")
+                self.bootstrap_yay(paths, config=config)
+                if config.developer_writable_prefixes:
+                    self.configure_developer_write_access(paths)
+        except Exception as exc:
+            self._write_metadata(paths, config, status=FAILED, last_error=str(exc))
             self._progress(f"Environment '{name}' failed. Logs are in {paths.logs_dir}.")
             raise
 
-        self._write_metadata(paths, config, status="ready")
+        self._write_metadata(paths, config, status=READY)
         self._progress(f"Environment '{name}' is ready.")
         return paths
 
     def shell(self, name: str, config: ArchEnvConfig) -> None:
         paths = self.paths(name)
-        self._require_environment(paths)
+        self._require_ready_environment(paths)
         self._run_in_container(
             paths,
             create_container_user_command(),
@@ -120,10 +121,14 @@ class EnvironmentManager:
             package_caches=False,
         )
         self.configure_container_sudo(paths)
-        self.configure_developer_write_access(paths)
-        self.configure_package_manager_wrappers(paths)
+        if config.developer_writable_prefixes:
+            self.configure_developer_write_access(paths)
+        self.configure_package_manager_helpers(paths, config)
         self._progress(f"Entering shell for environment '{name}'.")
-        env = safe_shell_environment(passthrough=config.env_passthrough)
+        env = safe_shell_environment(
+            passthrough=config.env_passthrough,
+            developer_writable_prefixes=config.developer_writable_prefixes,
+        )
         bind_mounts = device_bind_mounts(config.device_paths, forward_gpu=config.forward_gpu)
         if config.forward_display:
             env = {**env, **display_environment()}
@@ -144,7 +149,7 @@ class EnvironmentManager:
         if not command_to_run:
             raise ArchEnvError("run requires a command")
         paths = self.paths(name)
-        self._require_environment(paths)
+        self._require_ready_environment(paths)
         self._run_in_container(
             paths,
             create_container_user_command(),
@@ -154,10 +159,14 @@ class EnvironmentManager:
             package_caches=False,
         )
         self.configure_container_sudo(paths)
-        self.configure_developer_write_access(paths)
-        self.configure_package_manager_wrappers(paths)
+        if config.developer_writable_prefixes:
+            self.configure_developer_write_access(paths)
+        self.configure_package_manager_helpers(paths, config)
         self._progress(f"Running in environment '{name}': {' '.join(command_to_run)}")
-        env = forwarded_run_environment(passthrough=config.env_passthrough)
+        env = forwarded_run_environment(
+            passthrough=config.env_passthrough,
+            developer_writable_prefixes=config.developer_writable_prefixes,
+        )
         bind_mounts = device_bind_mounts(config.device_paths, forward_gpu=config.forward_gpu)
         if config.forward_display:
             env = {**env, **display_environment()}
@@ -174,11 +183,13 @@ class EnvironmentManager:
         )
         os.execvpe(command[0], command, _sudo_environment())
 
-    def install(self, name: str, packages: tuple[str, ...]) -> EnvironmentPaths:
+    def install(self, name: str, config: ArchEnvConfig, packages: tuple[str, ...]) -> EnvironmentPaths:
+        if not packages:
+            raise ArchEnvError("install requires at least one package")
         self._progress(f"Validating host prerequisites for package install in '{name}'.")
         validate_host_prerequisites()
         paths = self.paths(name)
-        self._require_environment(paths)
+        self._require_ready_environment(paths)
         self._run_in_container(
             paths,
             create_container_user_command(),
@@ -189,25 +200,23 @@ class EnvironmentManager:
         )
         self.configure_container_sudo(paths)
         self.restore_package_manager_directory_modes(paths)
-        pacman_packages: list[str] = []
-        aur_packages: list[str] = []
-
-        for package in packages:
-            self._progress(f"Resolving package source: {package}")
-            if self._is_pacman_package(paths, package):
-                pacman_packages.append(package)
-            else:
-                aur_packages.append(package)
+        pacman_packages, aur_packages = self._resolve_package_sources(paths, packages, config)
 
         if pacman_packages:
-            self.install_pacman_packages(paths, tuple(pacman_packages))
+            self.install_pacman_packages(paths, tuple(pacman_packages), config=config)
         if aur_packages:
-            self.install_aur_packages(paths, tuple(aur_packages))
-        self.configure_package_manager_wrappers(paths)
+            self.install_aur_packages(paths, tuple(aur_packages), config=config, bootstrap=False)
+        self.configure_package_manager_helpers(paths, config)
         self._progress(f"Package install complete for environment '{name}'.")
         return paths
 
-    def install_pacman_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
+    def install_pacman_packages(
+        self,
+        paths: EnvironmentPaths,
+        packages: tuple[str, ...],
+        *,
+        config: ArchEnvConfig | None = None,
+    ) -> None:
         self._progress(f"Installing pacman packages: {', '.join(packages)}")
         self.restore_package_manager_directory_modes(paths)
         self._run_in_container(
@@ -217,11 +226,24 @@ class EnvironmentManager:
             "Installing pacman packages",
             project_mount=False,
         )
-        self.configure_package_manager_wrappers(paths)
-        self.configure_developer_write_access(paths)
+        if config is not None:
+            self.configure_package_manager_helpers(paths, config)
+            if config.developer_writable_prefixes:
+                self.configure_developer_write_access(paths)
+        else:
+            self.configure_package_manager_helpers(paths)
+            self.configure_developer_write_access(paths)
 
-    def install_aur_packages(self, paths: EnvironmentPaths, packages: tuple[str, ...]) -> None:
-        self.bootstrap_yay(paths)
+    def install_aur_packages(
+        self,
+        paths: EnvironmentPaths,
+        packages: tuple[str, ...],
+        *,
+        config: ArchEnvConfig | None = None,
+        bootstrap: bool = True,
+    ) -> None:
+        if bootstrap:
+            self.bootstrap_yay(paths, config=config)
         self._progress(f"Installing AUR packages: {', '.join(packages)}")
         self.restore_package_manager_directory_modes(paths)
         self._run_in_container(
@@ -232,10 +254,15 @@ class EnvironmentManager:
             project_mount=False,
             user=CONTAINER_USER,
         )
-        self.configure_package_manager_wrappers(paths)
-        self.configure_developer_write_access(paths)
+        if config is not None:
+            self.configure_package_manager_helpers(paths, config)
+            if config.developer_writable_prefixes:
+                self.configure_developer_write_access(paths)
+        else:
+            self.configure_package_manager_helpers(paths)
+            self.configure_developer_write_access(paths)
 
-    def bootstrap_yay(self, paths: EnvironmentPaths) -> None:
+    def bootstrap_yay(self, paths: EnvironmentPaths, config: ArchEnvConfig | None = None) -> None:
         self._progress("Bootstrapping yay inside the environment.")
         self.configure_container_sudo(paths)
         self.restore_package_manager_directory_modes(paths)
@@ -269,7 +296,7 @@ class EnvironmentManager:
             project_mount=False,
             user=CONTAINER_USER,
         )
-        self.configure_package_manager_wrappers(paths)
+        self.configure_package_manager_helpers(paths, config)
 
     def restore_package_manager_directory_modes(self, paths: EnvironmentPaths) -> None:
         self._run_in_container(
@@ -281,12 +308,13 @@ class EnvironmentManager:
             package_caches=False,
         )
 
-    def configure_package_manager_wrappers(self, paths: EnvironmentPaths) -> None:
+    def configure_package_manager_helpers(self, paths: EnvironmentPaths, config: ArchEnvConfig | None = None) -> None:
+        developer_writable_prefixes = True if config is None else config.developer_writable_prefixes
         self._run_in_container(
             paths,
-            configure_package_manager_wrappers_command(),
-            "package-manager-wrappers.log",
-            "Configuring package-manager permission wrappers",
+            configure_package_manager_helpers_command(developer_writable_prefixes=developer_writable_prefixes),
+            "package-manager-helpers.log",
+            "Configuring package-manager permission helpers",
             project_mount=False,
             package_caches=False,
         )
@@ -314,7 +342,17 @@ class EnvironmentManager:
     def remove(self, name: str) -> EnvironmentPaths:
         paths = self.paths(name)
         self._progress(f"Removing environment '{name}' at {paths.env_dir}.")
+        self._remove_paths(paths)
+        self._progress(f"Removed environment '{name}'.")
+        return paths
+
+    def _remove_paths(self, paths: EnvironmentPaths, config: ArchEnvConfig | None = None) -> None:
         ensure_managed_environment_path(paths)
+        if paths.metadata_path.exists():
+            if config is not None:
+                self._write_metadata(paths, config, status=REMOVING)
+            else:
+                update_metadata_status(paths, status=REMOVING)
         try:
             shutil.rmtree(paths.env_dir)
         except PermissionError:
@@ -323,8 +361,6 @@ class EnvironmentManager:
                 paths.state_dir / f"remove-{paths.name}.log",
                 "Removing root-owned environment files",
             )
-        self._progress(f"Removed environment '{name}'.")
-        return paths
 
     def list(self) -> list[EnvironmentPaths]:
         envs_dir = self.project_dir / ".arch-env" / "envs"
@@ -335,10 +371,7 @@ class EnvironmentManager:
     def info(self, name: str) -> dict[str, object]:
         paths = self.paths(name)
         self._require_environment(paths)
-        try:
-            return json.loads(paths.metadata_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ArchEnvError(f"Environment metadata is invalid: {paths.metadata_path}") from exc
+        return read_metadata(paths)
 
     def _run_in_container(
         self,
@@ -361,60 +394,75 @@ class EnvironmentManager:
         )
         self._run_host_command(command_to_run, paths.logs_dir / log_name, description)
 
-    def _is_pacman_package(self, paths: EnvironmentPaths, package: str) -> bool:
-        try:
-            self._run_in_container(
-                paths,
-                pacman_query_command(package),
-                "package-resolution.log",
-                f"Checking official repositories for {package}",
-                project_mount=False,
-            )
-            return True
-        except CommandExecutionError as pacman_error:
-            pacman_log_path = pacman_error.log_path
-            self._progress(f"{package} was not confirmed in official repositories; checking AUR.")
-
-        try:
-            self.bootstrap_yay(paths)
-            self._run_in_container(
-                paths,
-                yay_query_command(package),
-                "aur-package-resolution.log",
-                f"Checking AUR for {package}",
-                project_mount=False,
-                user=CONTAINER_USER,
-            )
-            return False
-        except CommandExecutionError as aur_error:
-            raise ArchEnvError(
-                (
-                    f"Could not resolve package '{package}' in official repositories or AUR. "
-                    f"pacman log: {pacman_log_path}; AUR log: {aur_error.log_path}"
+    def _resolve_package_sources(
+        self,
+        paths: EnvironmentPaths,
+        packages: tuple[str, ...],
+        config: ArchEnvConfig,
+    ) -> tuple[list[str], list[str]]:
+        pacman_packages: list[str] = []
+        unresolved: list[tuple[str, str]] = []
+        for package in packages:
+            try:
+                self._run_in_container(
+                    paths,
+                    pacman_query_command(package),
+                    "package-resolution.log",
+                    f"Checking official repositories for {package}",
+                    project_mount=False,
                 )
-            ) from aur_error
+                pacman_packages.append(package)
+            except CommandExecutionError as pacman_error:
+                unresolved.append((package, pacman_error.log_path))
+
+        if not unresolved:
+            return pacman_packages, []
+
+        self._progress("Bootstrapping yay once for AUR package resolution.")
+        self.bootstrap_yay(paths, config=config)
+        aur_packages: list[str] = []
+        for package, pacman_log_path in unresolved:
+            self._progress(f"{package} was not confirmed in official repositories; checking AUR.")
+            try:
+                self._run_in_container(
+                    paths,
+                    yay_query_command(package),
+                    "aur-package-resolution.log",
+                    f"Checking AUR for {package}",
+                    project_mount=False,
+                    user=CONTAINER_USER,
+                )
+                aur_packages.append(package)
+            except CommandExecutionError as aur_error:
+                raise ArchEnvError(
+                    (
+                        f"Could not resolve package '{package}' in official repositories or AUR. "
+                        f"pacman log: {pacman_log_path}; AUR log: {aur_error.log_path}"
+                    )
+                ) from aur_error
+
+        return pacman_packages, aur_packages
 
     def _require_environment(self, paths: EnvironmentPaths) -> None:
         if not paths.metadata_path.exists():
             raise ArchEnvError(f"Environment does not exist: {paths.env_dir}")
 
-    def _write_metadata(self, paths: EnvironmentPaths, config: ArchEnvConfig, *, status: str) -> None:
-        metadata = {
-            "name": paths.name,
-            "status": status,
-            "created_at": datetime.now(UTC).isoformat(),
-            "arch_env_version": __version__,
-            "project_dir": str(paths.project_dir),
-            "paths": {
-                "env_dir": str(paths.env_dir),
-                "root_dir": str(paths.root_dir),
-                "pacman_cache_dir": str(paths.pacman_cache_dir),
-                "aur_cache_dir": str(paths.aur_cache_dir),
-                "logs_dir": str(paths.logs_dir),
-            },
-            "config": _json_safe_config(config),
-        }
-        paths.metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    def _require_ready_environment(self, paths: EnvironmentPaths) -> None:
+        self._require_environment(paths)
+        metadata = read_metadata(paths)
+        status = metadata.get("status")
+        if status != READY:
+            raise ArchEnvError(f"Environment is not ready: {paths.env_dir} (status: {status})")
+
+    def _write_metadata(
+        self,
+        paths: EnvironmentPaths,
+        config: ArchEnvConfig,
+        *,
+        status: str,
+        last_error: str | None = None,
+    ) -> None:
+        write_metadata(paths, config, status=status, last_error=last_error)
 
     def _run_host_command(self, command: list[str], log_path: Path, description: str) -> None:
         self._progress(f"{description}.")
@@ -424,15 +472,6 @@ class EnvironmentManager:
     def _progress(self, message: str) -> None:
         if self.progress is not None:
             self.progress(message)
-
-
-def _json_safe_config(config: ArchEnvConfig) -> dict[str, object]:
-    raw = asdict(config)
-    raw["config_path"] = str(config.config_path)
-    raw["extra_mounts"] = [str(path) for path in config.extra_mounts]
-    raw["device_paths"] = [str(path) for path in config.device_paths]
-    return raw
-
 
 def _sudo_environment() -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TERM": os.environ.get("TERM", "xterm")}

@@ -3,11 +3,12 @@ SHELL := /usr/bin/env bash
 PACMAN ?= pacman
 YAY ?= yay
 UV ?= uv
+UV_CACHE_DIR ?= .uv-cache
 
 PACMAN_PACKAGES := python uv sudo systemd arch-install-scripts base-devel git
 AUR_PACKAGES :=
 
-.PHONY: help deps pacman-deps aur-deps sync install uninstall test check
+.PHONY: help deps pacman-deps aur-deps sync install uninstall test smoke smoke-dry-run check
 
 help:
 	@printf '%s\n' 'arch-env development targets'
@@ -20,6 +21,8 @@ help:
 	@printf '%s\n' '  make reinstall    Reinstall ae/arch-env after source changes'
 	@printf '%s\n' '  make uninstall    Remove the uv tool install'
 	@printf '%s\n' '  make test         Run the test suite'
+	@printf '%s\n' '  make smoke        Run the real package-manager smoke test'
+	@printf '%s\n' '  make smoke-dry-run Print smoke-test commands without running them'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Override package lists if needed:'
 	@printf '%s\n' '  make deps PACMAN_PACKAGES="python uv sudo systemd arch-install-scripts base-devel git"'
@@ -43,7 +46,7 @@ aur-deps:
 
 sync:
 	@command -v $(UV) >/dev/null 2>&1 || { printf '%s\n' 'uv is required. Run make pacman-deps first.' >&2; exit 1; }
-	$(UV) sync
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) sync
 
 install:
 	@command -v $(UV) >/dev/null 2>&1 || { printf '%s\n' 'uv is required. Run make deps first.' >&2; exit 1; }
@@ -56,8 +59,14 @@ uninstall:
 	$(UV) tool uninstall arch-env
 
 test:
-	$(UV) run python -m unittest discover -s tests
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python -m unittest discover -s tests
+
+smoke:
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python scripts/smoke_dev_package_managers.py
+
+smoke-dry-run:
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python scripts/smoke_dev_package_managers.py --dry-run
 
 reinstall: install
 
-check: test
+check: test smoke-dry-run
